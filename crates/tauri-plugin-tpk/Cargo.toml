@@ -24,6 +24,11 @@ default = []
 zip = ["dep:zip"]
 
 [dependencies]
+tpk-format.workspace = true
+tpk-resolve.workspace = true
+tpk-store.workspace = true
+tpk-delta.workspace = true
+tauri-utils = "2"
 serde.workspace = true
 serde_json.workspace = true
 tauri.workspace = true
@@ -50,6 +55,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 
 [dev-dependencies]
 tempfile.workspace = true
+tpk-format = { workspace = true, features = ["pack"] }
 tokio = { version = "1", features = ["rt", "macros"] }
 tauri = { version = "2", features = ["test"] }
 

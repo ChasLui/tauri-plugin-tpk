@@ -40,6 +40,7 @@ mod commands;
 pub mod error;
 /// Manifest and response types exchanged between client and server.
 pub mod manifest;
+pub mod pack_assets;
 /// Configurable policy traits for OTA update lifecycle decisions.
 pub mod policy;
 /// Resolver trait and built-in implementations for update checking.
