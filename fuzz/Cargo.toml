@@ -1,0 +1,49 @@
+# Not a workspace member: cargo-fuzz builds this with its own nightly flags and
+# a sanitizer, which must not leak into the normal build.
+[package]
+name = "tpk-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+tempfile = "3"
+tpk-format = { path = "../crates/tpk-format" }
+tpk-delta = { path = "../crates/tpk-delta" }
+
+[[bin]]
+name = "path_parse"
+path = "fuzz_targets/path_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest_parse"
+path = "fuzz_targets/manifest_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "container_open"
+path = "fuzz_targets/container_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "delta_apply"
+path = "fuzz_targets/delta_apply.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzzing without optimisations finds an order of magnitude less.
+[profile.release]
+debug = 1

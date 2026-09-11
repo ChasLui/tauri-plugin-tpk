@@ -18,4 +18,9 @@ default = []
 encode = []
 
 [dev-dependencies]
+criterion.workspace = true
 tempfile.workspace = true
+
+[[bench]]
+name = "apply"
+harness = false

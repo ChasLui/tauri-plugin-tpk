@@ -2,8 +2,9 @@
 resolver = "2"
 members = ["crates/*"]
 # examples/*/src-tauri are standalone crates with their own lockfile; they must
-# not be pulled into this workspace or cargo refuses to build them.
-exclude = ["examples/shell-app/src-tauri"]
+# not be pulled into this workspace or cargo refuses to build them. `fuzz` is
+# excluded because cargo-fuzz builds it with its own nightly flags.
+exclude = ["examples/shell-app/src-tauri", "fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -39,6 +40,7 @@ sha2 = "0.10"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 ruzstd = "0.9"
 bsdiff = "0.2"
+criterion = { version = "0.5", default-features = false }
 globset = "0.4"
 # NFC checking for entry paths: macOS hands out NFD, Linux NFC, and the same
 # file packed on either must not become two distinct index keys.

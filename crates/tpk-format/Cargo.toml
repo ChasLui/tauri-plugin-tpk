@@ -39,7 +39,12 @@ workspace = true
 optional = true
 
 [dev-dependencies]
+criterion.workspace = true
 tempfile.workspace = true
 serde_json.workspace = true
 zip.workspace = true
 jsonschema.workspace = true
+
+[[bench]]
+name = "manifest"
+harness = false
