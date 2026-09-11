@@ -61,7 +61,27 @@ assumed.
     (verbatim as release.yml does, including the gitignored README copy and no
     --allow-dirty) and succeeded. commit 8f11720: 10/10 CI jobs.
 
+- [x] G8: the two open dependabot PRs are resolved by verifying each bump
+      rather than by trusting a green test run — the crypto ones sit on the
+      signature path, where a self-consistent suite proves nothing
+  EVIDENCE: #6 (base64 0.23, sha2 0.11, blake2 0.11, criterion 0.8) applied to
+    main directly, since the PR branch predates the `cargo update` and conflicts
+    on Cargo.lock. Validated in an isolated worktree first: compiles, 342 tests
+    pass, and — the part that actually matters — the committed golden fixture
+    built under sha2/blake2 0.10 still verifies under 0.11, with all three of
+    its controls still failing as designed. Separately confirmed a 0.10-built
+    pack repacks byte-identically under 0.11.
+    #1 was taken in half. `@tauri-apps/api` ^2.11.1 is in and builds. TypeScript
+    5.9 -> 7.0 is NOT: tsup 8.5.1's DTS step dies on TS 7 with
+    `Cannot read properties of undefined (reading 'useCaseSensitiveFileNames')`.
+    Isolated against a pnpm-version confound — local corepack pnpm 11.24 blocks
+    esbuild's install script and fails the baseline too, so the TS 7 failure was
+    reproduced under pnpm 10, which is what CI pins.
+
 <!--
+G8 is manual: the outcome is a judgement about which bumps to take, and the
+evidence is the experiments recorded above rather than one command.
+
 G7 shares gate-ci-green's oracle on purpose: the packaging job is part of the
 CI workflow, and that checker already requires every job to have concluded
 success. It is a separate gate because it is a separate outcome — a green CI
