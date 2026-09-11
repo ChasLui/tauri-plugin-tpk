@@ -15,7 +15,7 @@ or usage.
 ## Keys
 
 ```bash
-tpk keygen --out tpk-secret.key
+tpk keygen --out signing.key
 # prints the public key to stdout
 ```
 
@@ -177,11 +177,25 @@ aws s3 cp latest.json          "s3://$BUCKET/tpk/core/"
 aws s3 cp latest.json.minisig  "s3://$BUCKET/tpk/core/"
 ```
 
-`TPK_SECRET_KEY` comes from the environment. `set -euo pipefail` matters: without
+`TPK_SIGNING_KEY` comes from the environment. `set -euo pipefail` matters: without
 it a failed `verify` does not stop the upload.
 
 Manifest last, always — see
 [Server contract](./server-contract.md#publishing-order).
+
+A complete GitHub Actions version of this, with the parent fetch, the watermark
+gate, a post-upload smoke test through the CDN and a cold backup of the exact
+bytes, is in
+[`.github/workflows/content-release.yml`](https://github.com/ChasLui/tauri-plugin-tpk/blob/main/.github/workflows/content-release.yml).
+It is a template: adapt `PACK_ID` and the frontend build step.
+
+Two steps in it are worth copying even if you use something other than Actions.
+The **parent fetch** downloads the published pack and checks it against the
+digest in the published manifest, rather than rebuilding it — a rebuild that
+differs by one byte produces a patch whose parent link no client can satisfy.
+The **smoke test** fetches the manifest back through the CDN and compares its
+watermark to what was just uploaded, because a stale edge serving the previous
+manifest is the common failure and it is invisible unless you look.
 
 ## Rolling out gradually
 

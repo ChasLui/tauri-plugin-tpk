@@ -32,8 +32,8 @@ cdn/stable/
 ## Build a pack and a channel
 
 ```bash
-tpk keygen --out /tmp/tpk-secret.key      # prints the public key
-export TPK_SECRET_KEY=$(cat /tmp/tpk-secret.key)
+tpk keygen --out /tmp/signing.key      # prints the public key
+export TPK_SIGNING_KEY=$(cat /tmp/signing.key)
 
 pnpm build
 

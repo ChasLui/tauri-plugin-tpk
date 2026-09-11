@@ -1,0 +1,261 @@
+name: Content release
+
+# Publishes a content pack to a channel. This ships frontend content only —
+# anything that changes what the app *does* goes through a store release.
+# See docs/updater-boundary.md.
+#
+# This repository ships the plugin, not an app, so this workflow is a template:
+# it needs repository variables (CDN_BASE, CDN_BUCKET, AWS_REGION, TPK_PUBKEY,
+# TPK_KEY_EPOCH) and secrets (TPK_SIGNING_KEY, AWS credentials) that only a
+# consuming app has. Adapt two things when you copy it: PACK_ID, and the
+# "Build the frontend" step.
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Channel to publish to
+        required: true
+        default: stable
+        type: choice
+        options: [stable, beta]
+      version:
+        description: Display version (SemVer)
+        required: true
+      kind:
+        description: base rebuilds the whole tree; patch needs the previous pack
+        required: true
+        default: patch
+        type: choice
+        options: [patch, base]
+      rollout:
+        description: Percentage of devices to offer it to
+        required: false
+        default: "10"
+      dry_run:
+        description: Build and verify, but upload nothing
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write # for the cold-backup GitHub Release
+
+env:
+  CARGO_TERM_COLOR: always
+  PACK_ID: core
+
+concurrency:
+  # Two concurrent publishes race on latest.json, and the loser's watermark
+  # wins silently. One at a time per channel.
+  group: content-release-${{ github.event.inputs.channel }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@8cbdedb5103daa674dcf46d3590fe06a76645684 # v2.8.0
+
+      - uses: pnpm/action-setup@7088e561eb65bb68695d245aa206f005ef30921d # v4.1.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install the CLI
+        run: cargo install --path crates/tpk-cli --locked
+
+      # version_code is monotonic per pack id and must never be reused or
+      # lowered. UTC YYYYMMDDHHMMSS is monotonic, stateless, and unaffected by
+      # moving the repository or rebuilding CI — unlike a counter in a file.
+      #
+      # created_at is pinned rather than left to now() so packing the same
+      # input twice produces the same bytes. The blacklist matches on
+      # (id, version_code), so a rerun that changed the bytes would let a
+      # condemned release back onto devices that already rejected it.
+      - name: Compute release identity
+        id: identity
+        run: |
+          set -euo pipefail
+          {
+            echo "version_code=$(date -u +%Y%m%d%H%M%S)"
+            echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+
+      # The one step every app replaces. It must produce `dist/`, and that
+      # directory must contain no HTML with inline or remote <script> — `tpk
+      # pack` rejects it, for the CSP reasons in docs/overlay.md.
+      - name: Build the frontend
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      # A patch needs its parent's exact bytes. Fetch the published pack rather
+      # than rebuilding it: a rebuild that differs by one byte produces a patch
+      # whose parent link no client can satisfy.
+      - name: Fetch the parent pack
+        if: github.event.inputs.kind == 'patch'
+        env:
+          CDN_BASE: ${{ vars.CDN_BASE }}
+        run: |
+          set -euo pipefail
+          curl -fsSL "$CDN_BASE/${{ github.event.inputs.channel }}/latest.json" -o previous.json
+          url=$(jq -er --arg id "$PACK_ID" \
+            'first(.packs[] | select(.id == $id) | .url)' previous.json)
+          curl -fsSL "$url" -o parent.tpk
+          # The published manifest's digest is what the client will check the
+          # parent against, so check it here too.
+          want=$(jq -er --arg id "$PACK_ID" \
+            'first(.packs[] | select(.id == $id) | .sha256)' previous.json)
+          got=$(sha256sum parent.tpk | cut -d' ' -f1)
+          [ "$want" = "$got" ] || { echo "::error::parent digest mismatch"; exit 1; }
+
+      - name: Pack
+        env:
+          TPK_SIGNING_KEY: ${{ secrets.TPK_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          args=""
+          if [ "${{ github.event.inputs.kind }}" = "patch" ]; then
+            args="--parent parent.tpk"
+          fi
+          # shellcheck disable=SC2086
+          tpk pack \
+            --kind "${{ github.event.inputs.kind }}" \
+            --id "$PACK_ID" \
+            --version "${{ github.event.inputs.version }}" \
+            --version-code "${{ steps.identity.outputs.version_code }}" \
+            --created-at "${{ steps.identity.outputs.created_at }}" \
+            --channel "${{ github.event.inputs.channel }}" \
+            --dist dist/ \
+            $args \
+            --out "$PACK_ID-${{ github.event.inputs.version }}.tpk"
+
+      - name: Build and sign the channel manifest
+        env:
+          TPK_SIGNING_KEY: ${{ secrets.TPK_SIGNING_KEY }}
+          CDN_BASE: ${{ vars.CDN_BASE }}
+        run: |
+          set -euo pipefail
+          tpk channel \
+            --channel "${{ github.event.inputs.channel }}" \
+            --pack "$PACK_ID-${{ github.event.inputs.version }}.tpk" \
+            --url-base "$CDN_BASE/${{ github.event.inputs.channel }}/" \
+            --watermark auto \
+            --key-epoch "${{ vars.TPK_KEY_EPOCH || 1 }}" \
+            --rollout "${{ github.event.inputs.rollout }}" \
+            --out latest.json
+
+      # Verify with the *public* key, the same way a client will. Verifying
+      # with the key that just signed proves only that signing is deterministic.
+      - name: Verify
+        env:
+          TPK_PUBKEY: ${{ vars.TPK_PUBKEY }}
+        run: |
+          set -euo pipefail
+          tpk verify --pubkey "$TPK_PUBKEY" \
+            --min-epoch "${{ vars.TPK_KEY_EPOCH || 1 }}" \
+            --file latest.json \
+            --file "$PACK_ID-${{ github.event.inputs.version }}.tpk"
+          tpk inspect "$PACK_ID-${{ github.event.inputs.version }}.tpk"
+
+      # The client refuses any manifest at or below the watermark it has already
+      # seen for this channel, and does so silently. Catching it here is the
+      # difference between a failed job and a channel that quietly stops
+      # updating. Equal is accepted by the client, but on a publish it means the
+      # clock did not move and nothing would change — so require strictly newer.
+      - name: Watermark moved forward
+        if: github.event.inputs.kind == 'patch'
+        run: |
+          set -euo pipefail
+          old=$(jq -er '.watermark' previous.json)
+          new=$(jq -er '.watermark' latest.json)
+          if [ "$new" -le "$old" ]; then
+            echo "::error::watermark $new does not advance past $old"
+            exit 1
+          fi
+          echo "watermark $old -> $new"
+
+      - name: Upload
+        if: github.event.inputs.dry_run != 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION }}
+          BUCKET: ${{ vars.CDN_BUCKET }}
+        run: |
+          set -euo pipefail
+          dest="s3://$BUCKET/${{ github.event.inputs.channel }}"
+
+          # Packs first, manifest last. A manifest advertising a pack that is
+          # not yet reachable produces download failures for every client that
+          # polls in the gap. Packs are content-addressed, so immutable.
+          aws s3 cp "$PACK_ID-${{ github.event.inputs.version }}.tpk" "$dest/" \
+            --cache-control "max-age=31536000, immutable"
+
+          # Let the CDN settle before anything points at the new object.
+          sleep 30
+
+          aws s3 cp latest.json "$dest/" --cache-control "max-age=60"
+          aws s3 cp latest.json.minisig "$dest/" --cache-control "max-age=60"
+
+      # Fetch back through the CDN and verify what a client would actually get,
+      # not what we believe we uploaded.
+      - name: Smoke test the published channel
+        if: github.event.inputs.dry_run != 'true'
+        env:
+          CDN_BASE: ${{ vars.CDN_BASE }}
+          TPK_PUBKEY: ${{ vars.TPK_PUBKEY }}
+        run: |
+          set -euo pipefail
+          base="$CDN_BASE/${{ github.event.inputs.channel }}"
+          curl -fsSL "$base/latest.json" -o published.json
+          curl -fsSL "$base/latest.json.minisig" -o published.json.minisig
+
+          url=$(jq -er --arg id "$PACK_ID" \
+            'first(.packs[] | select(.id == $id) | .url)' published.json)
+          curl -fsSL "$url" -o published.tpk
+
+          tpk verify --pubkey "$TPK_PUBKEY" \
+            --file published.json --file published.tpk
+
+          # A stale edge serving the previous manifest is the common failure,
+          # and it is invisible unless you look.
+          got=$(jq -er '.watermark' published.json)
+          want=$(jq -er '.watermark' latest.json)
+          [ "$got" = "$want" ] || {
+            echo "::error::the CDN is serving watermark $got, expected $want"
+            exit 1
+          }
+
+      # A cold backup of the exact bytes. Without the parent pack you cannot
+      # build the next patch, and an S3 lifecycle rule will eventually eat it.
+      - name: Cold backup
+        if: github.event.inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ github.event.inputs.channel }}
+          KIND: ${{ github.event.inputs.kind }}
+          VERSION: ${{ github.event.inputs.version }}
+          VERSION_CODE: ${{ steps.identity.outputs.version_code }}
+          CREATED_AT: ${{ steps.identity.outputs.created_at }}
+          ROLLOUT: ${{ github.event.inputs.rollout }}
+        run: |
+          set -euo pipefail
+          tag="content-$CHANNEL-$VERSION_CODE"
+          cat > notes.md <<EOF
+          channel: $CHANNEL
+          kind: $KIND
+          version: $VERSION
+          version_code: $VERSION_CODE
+          created_at: $CREATED_AT
+          rollout: $ROLLOUT%
+          EOF
+          gh release create "$tag" --title "$tag" --notes-file notes.md \
+            "$PACK_ID-$VERSION.tpk" latest.json latest.json.minisig

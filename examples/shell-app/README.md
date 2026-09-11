@@ -16,8 +16,8 @@ remote script, so the same directory can be shipped either way unchanged.
 ## Serving a channel locally
 
 ```bash
-tpk keygen --out tpk-secret.key            # prints the public key
-export TPK_SECRET_KEY=$(cat tpk-secret.key)
+tpk keygen --out signing.key            # prints the public key
+export TPK_SIGNING_KEY=$(cat signing.key)
 export TPK_PUBKEY=RWT...                   # paste the printed key
 
 ./publish.sh                               # -> cdn/stable/

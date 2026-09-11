@@ -106,7 +106,7 @@ cargo install tpk-cli
 ### 2. Generate a signing key
 
 ```bash
-tpk keygen --out tpk-secret.key   # prints the public key
+tpk keygen --out signing.key   # prints the public key
 ```
 
 Keep the secret key in a CI secret. Never commit it.

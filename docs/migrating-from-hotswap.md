@@ -146,7 +146,7 @@ needs `tpk:allow-reset` and is not in the default set.
 Old bundles do not load. Repack from source:
 
 ```bash
-tpk keygen --out secret.key
+tpk keygen --out signing.key
 tpk pack --kind base --id core \
   --version 2.0.0 --version-code "$(date -u +%Y%m%d%H%M%S)" \
   --created-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

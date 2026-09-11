@@ -4,11 +4,11 @@
 # Serve that directory over https and point `plugins.tpk.manifest_url` at it.
 # See docs/local-testing.md.
 #
-#   TPK_SECRET_KEY=$(cat tpk-secret.key) ./publish.sh [parent.tpk]
+#   TPK_SIGNING_KEY=$(cat signing.key) ./publish.sh [parent.tpk]
 
 set -eu
 
-: "${TPK_SECRET_KEY:?set TPK_SECRET_KEY (tpk keygen --out tpk-secret.key)}"
+: "${TPK_SIGNING_KEY:?set TPK_SIGNING_KEY (tpk keygen --out signing.key)}"
 
 URL_BASE="${URL_BASE:-https://localhost:8443/stable/}"
 OUT_DIR="cdn/stable"
