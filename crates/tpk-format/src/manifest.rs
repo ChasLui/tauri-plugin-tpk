@@ -44,10 +44,11 @@ impl Sha256Hex {
             )));
         }
         let mut out = [0u8; 32];
-        for (i, chunk) in s.as_bytes().chunks_exact(2).enumerate() {
-            let hi = hex_nibble(chunk[0])?;
-            let lo = hex_nibble(chunk[1])?;
-            out[i] = (hi << 4) | lo;
+        // `as_chunks::<2>` rather than `chunks_exact(2)`: the length is a
+        // constant, so this gives `&[u8; 2]` and drops the bounds checks. The
+        // remainder is empty by the length check above.
+        for (i, [hi, lo]) in s.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+            out[i] = (hex_nibble(*hi)? << 4) | hex_nibble(*lo)?;
         }
         Ok(Self(out))
     }
