@@ -33,15 +33,20 @@ assumed.
   EXPECT: GATE_DETERMINISM_PASS
   EVIDENCE: failed first, which is the point. host de57d9b4... vs vm 8cd8e666... for identical input; the diff was exactly 7 bytes, one per central directory header, at the 'version made by' host byte (0x03 Unix on macOS, 0x00 FAT on Windows). Fixed by pinning `.system(zip::System::Unix)` and `.unix_permissions(0o644)`. Re-run: host and vm both de57d9b4..., and both controls (created_at +1s) moved to 44040a6f... A CI-runnable regression test was added in pack.rs; it asserts the host byte and so bites on the windows-latest runner.
 
-- [ ] G5: every job of the CI workflow succeeds on the pushed commit
+- [x] G5: every job of the CI workflow succeeds on the pushed commit
   CHECK: node scripts/gate-ci-green.mjs
   EXPECT: GATE_CI_GREEN_PASS
-  EVIDENCE: pending — commit 2ec33f5 was 9/9 green, but the pack.rs and
-    Cargo.lock changes since then have not been through CI. Must be re-run
-    against the pushed HEAD.
+  EVIDENCE: commit 013d45d, 9/9 CI jobs succeeded — includes windows-latest
+    and macos-latest, and the MSRV 1.88 job.
 
-- [ ] G6: the Deploy Docs workflow succeeds
-  EVIDENCE: pending
+- [x] G6: the Deploy Docs workflow succeeds
+  EVIDENCE: the repository had GitHub Pages disabled, so every Deploy Docs run
+    failed with "404 ... Ensure GitHub Pages has been enabled". Enabled by the
+    owner's instruction through the Settings UI (source: GitHub Actions);
+    `gh api repos/ChasLui/tauri-plugin-tpk/pages` now reports
+    build_type=workflow. Run 34588298125 succeeded, and the published site
+    answers 200 on /, /overlay/ and /app-review-checklist/ — so the deploy is
+    confirmed from the outside, not just from a green job.
 
 <!--
 G6 is manual because it is blocked on a repository setting (GitHub Pages is not
