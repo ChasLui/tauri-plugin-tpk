@@ -37,7 +37,7 @@ The built-in `HttpResolver` expects a specific shape from your endpoint:
 
 These opinions exist because they work for 90% of apps. A simple endpoint with a database query and a CDN-hosted bundle is all you need.
 
-**But if they don't fit** — you're not stuck. Implement `HotswapResolver` and the entire server contract disappears. The plugin only cares about getting a `HotswapManifest` back. How you get there is up to you.
+**But if they don't fit** — you're not stuck. Implement `TpkResolver` and the entire server contract disappears. The plugin only cares about getting a `TpkManifest` back. How you get there is up to you.
 
 ---
 
@@ -47,16 +47,16 @@ Every extension point exists because real apps needed it:
 
 ### Bring your own update source
 
-The `HotswapResolver` trait decouples update checking from the transport layer. The built-in `HttpResolver` calls a URL. But you can implement the trait to check anywhere — a local file, a database, a custom protocol:
+The `TpkResolver` trait decouples update checking from the transport layer. The built-in `HttpResolver` calls a URL. But you can implement the trait to check anywhere — a local file, a database, a custom protocol:
 
 ```rust
-use tauri_plugin_hotswap::{HotswapResolver, CheckContext, HotswapManifest};
+use tauri_plugin_tpk::{TpkResolver, CheckContext, TpkManifest};
 
 struct MyResolver { /* ... */ }
 
-impl HotswapResolver for MyResolver {
+impl TpkResolver for MyResolver {
     fn check(&self, ctx: &CheckContext)
-        -> Pin<Box<dyn Future<Output = Result<Option<HotswapManifest>>> + Send>>
+        -> Pin<Box<dyn Future<Output = Result<Option<TpkManifest>>> + Send>>
     {
         // Check a local SQLite DB, a gRPC service, a message queue — anything.
     }

@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in contributing to `tauri-plugin-hotswap`!
+Thanks for your interest in contributing to `tauri-plugin-tpk`!
 
 ## Development setup
 

@@ -1,0 +1,19 @@
+[package]
+name = "tpk-resolve"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Layered overlay resolution for TPK packs: tombstones, index, LRU cache, CSP hashes."
+
+[dependencies]
+tpk-format.workspace = true
+sha2.workspace = true
+globset.workspace = true
+log.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

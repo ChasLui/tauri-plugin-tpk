@@ -4,76 +4,110 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-`tauri-plugin-hotswap` is an OTA frontend update plugin for Tauri v2. It lets apps push frontend asset updates without rebuilding the binary. Bundles are signed with minisign, verified before extraction, and auto-rollback fires if `notifyReady()` isn't called after a launch.
+`tauri-plugin-tpk` delivers OTA frontend updates to Tauri v2 apps. Content ships as
+signed `.tpk` packs (ZIP + `tpk-manifest.json`); packs stack as layers over the
+binary's embedded assets, so a release can be a full base, a file-level patch with
+bsdiff deltas and deletion tombstones, or optional DLC. A three-state pointer
+(staged → booting → committed) plus a blacklist guarantees a bad pack can never
+brick the app.
+
+The frozen contract lives in `spec/tpk-v1.md`. **Appendix A of that file overrides
+the body** — it records where the original spec conflicts with Tauri's real API,
+with App Store / Play policy, and with measured performance.
+
+## Repository Layout
+
+```
+crates/
+  tpk-format/       # TPK/1 container, manifest, signatures — single source of truth
+  tpk-delta/        # bsdiff apply (runtime) / diff (CLI)
+  tpk-resolve/      # layered overlay, tombstones, index, LRU, CSP hashes
+  tpk-store/        # layer pool, three-state machine, blacklist, delta materialization
+  tpk-client/       # channel manifest fetch, update planning, resumable download
+  tpk-cli/          # `tpk` binary: pack / sign / verify / channel / inspect / audit
+  tauri-plugin-tpk/ # attach/init, PackAssets, commands, events, permissions
+packages/tauri-plugin-tpk-api/   # TypeScript guest API (npm: tauri-plugin-tpk-api)
+examples/shell-app/              # standalone crate, NOT a workspace member
+spec/                            # tpk-v1.md + json-schema/
+```
+
+Dependency direction is strictly one-way and must stay that way:
+
+```
+tpk-format ◄── tpk-resolve ◄── tpk-store ──► tpk-delta
+tpk-format ◄── tpk-client          # client must NOT depend on store
+all of the above ◄── tauri-plugin-tpk
+```
+
+`tpk-client` deliberately does not depend on `tpk-store` so that `Client::plan` stays
+a pure function and is testable without touching disk.
 
 ## Build & Test Commands
 
 ```bash
-# Rust
-cargo check                              # basic compile check
-cargo check --features zip               # with optional zip support
-cargo test                               # run all tests
-cargo test --features zip                # tests including zip feature
-cargo fmt --check                        # format check
-cargo clippy --all-features -- -D warnings  # lint
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo fmt --all --check
+cargo check --workspace --all-features          # with the 1.88 toolchain to check MSRV
+cargo check --manifest-path examples/shell-app/src-tauri/Cargo.toml
 
-# Guest JS (TypeScript frontend API)
-pnpm -C guest-js install --frozen-lockfile
-pnpm -C guest-js build                   # builds via tsup (ESM + dts)
-
-# Example app
-cd examples/basic && pnpm install && cd src-tauri && cargo run
+pnpm -C packages/tauri-plugin-tpk-api install --frozen-lockfile
+pnpm -C packages/tauri-plugin-tpk-api build
 ```
 
-## Architecture
-
-**Two-sided plugin**: Rust crate (`src/`) + TypeScript API (`guest-js/src/index.ts`), connected through Tauri's IPC command system.
-
-### Rust Side (`src/`)
-
-- **`lib.rs`** — Plugin entry point. Three initialization paths: `init()` (config file), `init_with_config()` (programmatic), `HotswapBuilder` (custom resolver). Before Tauri builds, it reads the `current` pointer, validates binary compatibility via semver, auto-rolls back if needed, and swaps `context.assets` with `HotswapAssets`.
-- **`assets.rs`** — `HotswapAssets` implements Tauri's `Assets` trait. Resolution chain: filesystem OTA dir → `.html` fallback → `/index.html` → embedded assets. This enables partial bundles.
-- **`commands.rs`** — Tauri command handlers (`hotswap_check`, `hotswap_apply`, `hotswap_download`, `hotswap_activate`, `hotswap_rollback`, `hotswap_notify_ready`, `hotswap_configure`, `hotswap_get_config`).
-- **`updater.rs`** — Core update logic: download with progress, signature verification, archive extraction, pointer file management, rollback.
-- **`resolver.rs`** — `HotswapResolver` trait with `HttpResolver` (default) and `StaticFileResolver` implementations.
-- **`manifest.rs`** — Data structures for update manifests and metadata.
-- **`error.rs`** — Error types using `thiserror`. All errors flow through `crate::Error` / `crate::Result`.
-
-### TypeScript Side (`guest-js/src/index.ts`)
-
-Exports: `checkUpdate`, `applyUpdate`, `downloadUpdate`, `activateUpdate`, `rollback`, `getVersionInfo`, `notifyReady`, `configure`, `getConfig`, `onDownloadProgress`, `onLifecycle`.
-
-### On-Disk Layout
-
-```
-{app_data_dir}/hotswap/
-├── current           # text pointer: "seq-42"
-├── seq-41/           # previous version (kept for rollback)
-│   ├── hotswap-meta.json
-│   └── ...assets
-├── seq-42/           # active version
-└── .tmp-seq-43/      # in-progress extraction (cleaned on completion)
-```
+`examples/shell-app/src-tauri` is excluded from the workspace and carries its own
+lockfile, so `--workspace` never covers it — check it separately (CI has a job).
 
 ## Code Style
 
 - `rustfmt.toml`: edition 2021, max_width 100
-- Use existing error types from `error.rs` — no raw `String` errors
-- Prefer `pub(crate)` over `pub` for internal functions
-- All public items need doc comments
-- MSRV: Rust 1.77.2
+- MSRV 1.88, enforced by a CI job. Raising it is a breaking change for downstream.
+- Use the crate's own error type; no raw `String` errors. Every error maps to one of
+  the 14 frozen `E_*` codes; serialization is `{"code": "E_HASH", "message": "..."}`.
+- Prefer `pub(crate)` over `pub` for internal functions; all public items need docs.
+- Business outcomes go through return values, not `Err`: `check`/`download` return
+  `Ok(Outcome { status })` for up_to_date / shell_required / blacklisted / disabled.
+  Reserve `Err` for programming errors and unclassifiable IO.
 
 ## Workflow
 
 - **Never commit or push** — the user handles all git operations. Only make file changes.
-- **Website must stay in sync** — when adding new docs (`docs/*.md`), also add a symlink in `website/src/content/docs/`, add the page to the sidebar in `website/astro.config.mjs`, and update `website/src/content/docs/index.mdx` if relevant. The `website/src/content/docs/readme.md` is NOT a symlink and must be updated separately from `README.md`.
+- **Website must stay in sync** — when adding `docs/*.md`, also add a symlink in
+  `website/src/content/docs/`, add the page to the sidebar in `website/astro.config.mjs`,
+  and update `website/src/content/docs/index.mdx` if relevant.
+  `website/src/content/docs/readme.md` is generated by `website/sync-readme.mjs`, not a symlink.
+- **New crates** must be added to the workspace `members` and to the version checks in
+  `.github/workflows/release.yml`.
+- **Permissions are auto-generated** by `build.rs` into
+  `crates/tauri-plugin-tpk/permissions/autogenerated/` — don't edit those files.
+  The `permissions/` directory must live next to the plugin crate's `build.rs`;
+  `tauri-plugin`'s builder resolves it by relative path and silently produces an
+  empty permission set if it is missing.
 
 ## Key Design Decisions
 
-- **Permissions are auto-generated** by `build.rs` into `permissions/autogenerated/` — don't edit those files manually.
-- **TLS varies by platform**: `native-tls` on desktop, `rustls-tls` on Android (see conditional deps in `Cargo.toml`).
-- **Runtime config changes are memory-only** — they don't persist across app restarts.
-- **Two versions retained on disk** (current + previous for rollback). Older versions are cleaned up.
-- **Atomic operations**: temp dir + rename pattern for crash safety during extraction and pointer updates.
-- **Plugin builder config type must accept any JSON**: Tauri always deserializes `plugins.hotswap` during `Builder::run()`, including `null` when the section is absent. Use a permissive type (`serde_json::Value`) for the builder API config generic, then parse `HotswapConfig` explicitly in `init()` / `init_with_config()` paths.
-- **Mobile dev mode bypasses Assets trait**: `cargo tauri ios dev` / `android dev` proxy all asset requests to the dev server — `Assets::get()` is never called. Use `cargo tauri ios build --debug` / `android build --debug` to test real OTA asset serving.
+- **`attach` before `init`**: `attach(&mut ctx)` swaps `ctx.assets` for `PackAssets`
+  and keeps the embedded assets as the fallback. It must not resolve any path —
+  `app_local_data_dir()` goes through JNI on Android and is unavailable that early.
+- **Everything stateful happens in the plugin `setup` hook**, which runs at the end of
+  `Builder::build()`, before any window exists. `setup` must **never return `Err`** —
+  that aborts `Builder::build` and the app fails to start; disk problems log and
+  degrade to embedded assets instead.
+- **`PackAssets` uses `OnceLock`, not `RwLock`**: layers are frozen for the process
+  lifetime by design (spec §7), so a running WebView always sees a consistent index.
+- **Delta materialization happens in `stage()`, never in `boot()`**: doing it at boot
+  blocks window creation and can trip the iOS 20s launch watchdog / Android ANR,
+  which then interacts with the boot-attempt counter to blacklist a perfectly good pack.
+- **Two disk roots**: `$APPLOCALDATA/tpk/` holds state and the layer pool (excluded
+  from iCloud backup); `$APPCACHE/tpk/` holds materialized deltas and `.part` files,
+  which the OS may purge at any time — so the lazy materialization path must always exist.
+- **`zip` must stay `default-features = false`**: its default feature set drags
+  `zstd-sys` (C bindings), `bzip2`, `lzma-rust2` and `ppmd-rust` into the runtime.
+  Runtime zstd decoding uses pure-Rust `ruzstd`; the C encoder is CLI-only, and
+  `deny.toml` pins that boundary with a `wrappers` allowlist.
+- **Store compliance is a design constraint, not a footnote**: `PackKind::{Dlc, Mod}`
+  do not compile for App Store targets, mobile defaults disable auto-check/auto-download,
+  and `tpk pack` rejects HTML with inline or remote `<script>`. See `spec/tpk-v1.md` A.4.
+- **Mobile dev mode bypasses the Assets trait**: `cargo tauri ios dev` / `android dev`
+  proxy all asset requests to the dev server — `Assets::get()` is never called. Use
+  `cargo tauri ios build --debug` / `android build --debug` to test real OTA serving.

@@ -1,67 +1,53 @@
-[package]
-name = "tauri-plugin-hotswap"
-version = "0.0.4"
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# examples/*/src-tauri are standalone crates with their own lockfile; they must
+# not be pulled into this workspace or cargo refuses to build them.
+exclude = ["examples/shell-app/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
-description = "Open-source OTA plugin for Tauri v2 — push frontend updates to users without rebuilding the binary. Self-hosted, signed bundles, auto-rollback."
-repository = "https://github.com/denniskribl/tauri-plugin-hotswap"
-documentation = "https://docs.rs/tauri-plugin-hotswap"
-readme = "README.md"
-keywords = ["tauri", "plugin", "ota", "hotswap", "update"]
-categories = ["gui", "web-programming"]
-links = "tauri-plugin-hotswap"
-exclude = [
-    ".github/",
-    ".gitignore",
-    "website/",
-    "docs/",
-    "examples/",
-    "Cargo.lock",
-    "CLAUDE.md",
-    "CONTRIBUTING.md",
-    "SECURITY.md",
-    "deny.toml",
-    "rustfmt.toml",
-    "guest-js/pnpm-lock.yaml",
-]
+repository = "https://github.com/ChasLui/tauri-plugin-tpk"
+authors = ["ChasLui"]
 
-[lib]
-name = "tauri_plugin_hotswap"
-path = "src/lib.rs"
+[workspace.dependencies]
+# internal
+tpk-format = { path = "crates/tpk-format", version = "=0.1.0" }
+tpk-delta = { path = "crates/tpk-delta", version = "=0.1.0" }
+tpk-resolve = { path = "crates/tpk-resolve", version = "=0.1.0" }
+tpk-store = { path = "crates/tpk-store", version = "=0.1.0" }
+tpk-client = { path = "crates/tpk-client", version = "=0.1.0" }
 
-[features]
-default = []
-zip = ["dep:zip"]
-
-[dependencies]
+# third-party
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tauri = "2"
 log = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 tokio = { version = "1", features = ["fs", "io-util", "time"] }
-semver = "1"
+semver = { version = "1", features = ["serde"] }
 minisign-verify = "0.2"
-tar = "0.4"
-flate2 = "1"
 thiserror = "2"
 base64 = "0.22"
 url = "2"
-dirs = "6"
-zip = { version = "8", optional = true }
-
-# TLS: native-tls on desktop, rustls on Android
-[target.'cfg(not(target_os = "android"))'.dependencies]
-reqwest = { version = "0.12", features = ["json", "stream", "native-tls"] }
-
-[target.'cfg(target_os = "android")'.dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
-
-[dev-dependencies]
+sha2 = "0.10"
+# zip: default-features MUST stay off. The default feature set pulls in
+# zstd-sys (C bindings), bzip2, lzma-rust2 and ppmd-rust at runtime.
+zip = { version = "8", default-features = false, features = ["deflate"] }
+ruzstd = "0.9"
+bsdiff = "0.2"
+globset = "0.4"
+# NFC checking for entry paths: macOS hands out NFD, Linux NFC, and the same
+# file packed on either must not become two distinct index keys.
+unicode-normalization = "0.1"
+clap = { version = "4", features = ["derive"] }
+# Signing (build machines only, behind tpk-format/pack). Pinned to the digest
+# 0.10 generation so they share sha2's traits instead of forking the graph.
+ed25519-compact = "2.4"
+blake2 = "0.10"
 tempfile = "3"
-tokio = { version = "1", features = ["rt", "macros"] }
-tauri = { version = "2", features = ["test"] }
-
-[build-dependencies]
-tauri-plugin = { version = "2", features = ["build"] }
+# Dev-only: keeps spec/json-schema and the Rust parsers from drifting apart.
+jsonschema = "=0.56"

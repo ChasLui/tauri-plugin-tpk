@@ -1,0 +1,57 @@
+[package]
+name = "tauri-plugin-tpk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "OTA frontend updates for Tauri v2 — signed TPK content packs, layered overlay, three-state rollback. Self-hosted, no binary rebuild."
+documentation = "https://docs.rs/tauri-plugin-tpk"
+# README.md is copied in from the repo root by the release workflow; see
+# .github/workflows/release.yml. Keep it out of git (see .gitignore).
+readme = "README.md"
+keywords = ["tauri", "plugin", "ota", "tpk", "update"]
+categories = ["gui", "web-programming"]
+links = "tauri-plugin-tpk"
+
+[lib]
+name = "tauri_plugin_tpk"
+path = "src/lib.rs"
+
+[features]
+default = []
+zip = ["dep:zip"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tauri.workspace = true
+log.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+semver.workspace = true
+minisign-verify.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+url.workspace = true
+zip = { workspace = true, optional = true }
+# TODO(step-5b): dropped once the hotswap updater is replaced by tpk-store/tpk-client.
+tar = "0.4"
+flate2 = "1"
+dirs = "6"
+
+# TLS: native-tls on desktop, rustls on Android
+[target.'cfg(not(target_os = "android"))'.dependencies]
+reqwest = { version = "0.12", features = ["json", "stream", "native-tls"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { version = "1", features = ["rt", "macros"] }
+tauri = { version = "2", features = ["test"] }
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

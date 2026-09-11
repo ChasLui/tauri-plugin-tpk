@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ChasLui/tauri-plugin-tpk/spec/json-schema/channel-manifest.schema.json",
+  "title": "TPK channel manifest",
+  "description": "The static JSON a client fetches from the CDN, with a detached .minisig alongside it. Cross-field rules that JSON Schema cannot express (no duplicate id+version_code, patch parents below their child) are enforced by ChannelManifest::parse.",
+  "type": "object",
+  "required": ["spec", "channel", "published_at", "watermark", "packs"],
+  "properties": {
+    "spec": { "const": "tpk-channel/1" },
+    "channel": { "type": "string", "minLength": 1 },
+    "published_at": { "type": "string", "description": "RFC 3339." },
+    "watermark": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic per channel. Clients keep a floor per channel, not one global value, or switching channels wedges updates permanently. A manifest equal to the floor is accepted; only a strictly smaller one is discarded."
+    },
+    "key_epoch": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Which signing key generation covers this manifest. Clients keep a monotonic min_key_epoch and refuse anything below it, which is what lets a leaked key be retired without waiting for every device to drop it."
+    },
+    "min_shell": { "type": "string" },
+    "force_shell": {
+      "type": "string",
+      "description": "When set and above the running shell, no pack is applied at all. Use only when the shell should not receive even a hotfix."
+    },
+    "notes": {
+      "type": "string",
+      "description": "Truncated to 200 characters on parse. CDN-controlled text; not intended for display to end users."
+    },
+    "packs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/packRef" }
+    }
+  },
+  "$defs": {
+    "packRef": {
+      "type": "object",
+      "required": ["id", "kind", "version", "version_code", "url", "size", "sha256"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
+        "kind": { "enum": ["base", "patch", "dlc", "mod"] },
+        "version": { "type": "string" },
+        "version_code": { "type": "integer", "minimum": 1 },
+        "parent_version_code": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Required for kind=patch, forbidden otherwise."
+        },
+        "url": { "type": "string" },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Digest of the .tpk file."
+        },
+        "optional": { "type": "boolean", "default": false },
+        "rollout": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 100,
+          "description": "Staged rollout percentage. Clients bucket themselves with sha256(install_id, id, version_code); devices outside the bucket still advance their watermark."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "patch" } }, "required": ["kind"] },
+          "then": { "required": ["parent_version_code"] },
+          "else": { "not": { "required": ["parent_version_code"] } }
+        }
+      ]
+    }
+  }
+}

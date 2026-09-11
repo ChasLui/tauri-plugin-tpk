@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ChasLui/tauri-plugin-tpk/spec/json-schema/pack-manifest.schema.json",
+  "title": "TPK/1 pack manifest",
+  "description": "tpk-manifest.json, the document a pack's signature covers. Cross-field rules that JSON Schema cannot express (entries sorted by path, blob name matching blob_sha256, mod packs declaring trusted=false) are enforced by PackManifest::parse.",
+  "type": "object",
+  "required": ["spec", "kind", "id", "version", "version_code", "created_at", "entries"],
+  "properties": {
+    "spec": {
+      "const": "tpk/1"
+    },
+    "kind": {
+      "enum": ["base", "patch", "dlc", "mod"],
+      "description": "dlc and mod are desktop-only; they do not compile for App Store targets."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+    },
+    "version": {
+      "type": "string",
+      "description": "SemVer. Display only — every comparison uses version_code."
+    },
+    "version_code": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Monotonic per id. A publisher may never reuse or lower it."
+    },
+    "min_shell": { "type": "string" },
+    "max_shell": { "type": "string" },
+    "parent": {
+      "type": "object",
+      "description": "Required for kind=patch, forbidden for kind=base.",
+      "required": ["id", "version", "version_code", "manifest_sha256"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
+        "version": { "type": "string" },
+        "version_code": { "type": "integer", "minimum": 1 },
+        "manifest_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "description": "RFC 3339."
+    },
+    "channel": { "type": "string" },
+    "policies": {
+      "type": "object",
+      "properties": {
+        "can_override": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["**"],
+          "description": "Must stay at the default until the policy engine ships; a non-default value is rejected rather than ignored."
+        },
+        "cannot_override": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
+        },
+        "trusted": { "type": "boolean", "default": true }
+      }
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/entry" },
+      "description": "Sorted by path, each path unique."
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "base" } }, "required": ["kind"] },
+      "then": { "not": { "required": ["parent"] } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "patch" } }, "required": ["kind"] },
+      "then": { "required": ["parent"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "mod" } }, "required": ["kind"] },
+      "then": {
+        "required": ["policies"],
+        "properties": {
+          "policies": {
+            "required": ["trusted"],
+            "properties": { "trusted": { "const": false } }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Lowercase hex. Uppercase is rejected so a digest has one spelling."
+    },
+    "entry": {
+      "type": "object",
+      "required": ["path", "op"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "POSIX, absolute, NFC. No '.', '..', empty segments, backslashes, drive letters, or reserved runtime prefixes."
+        },
+        "op": { "enum": ["full", "delta", "delete"] },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "blob": {
+          "type": "string",
+          "pattern": "^blobs/[0-9a-f]{64}(\\.zst)?$"
+        },
+        "blob_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "Digest of the blob's raw, still-encoded bytes. Without it a delta blob has no signature-covered digest at all."
+        },
+        "blob_size": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Bounds the decoder; a zstd frame may not expand past what this implies."
+        },
+        "encoding": { "enum": ["identity", "zstd", "zstd+bsdiff"] },
+        "delta_base_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "What the layers below must resolve to. Present only for op=delta."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "op": { "const": "delete" } }, "required": ["op"] },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["size"] },
+                { "required": ["sha256"] },
+                { "required": ["blob"] },
+                { "required": ["blob_sha256"] },
+                { "required": ["blob_size"] },
+                { "required": ["encoding"] },
+                { "required": ["delta_base_sha256"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": { "properties": { "op": { "const": "full" } }, "required": ["op"] },
+          "then": {
+            "required": ["size", "sha256", "blob", "blob_sha256", "blob_size", "encoding"],
+            "properties": { "encoding": { "enum": ["identity", "zstd"] } },
+            "not": { "required": ["delta_base_sha256"] }
+          }
+        },
+        {
+          "if": { "properties": { "op": { "const": "delta" } }, "required": ["op"] },
+          "then": {
+            "required": [
+              "size",
+              "sha256",
+              "blob",
+              "blob_sha256",
+              "blob_size",
+              "encoding",
+              "delta_base_sha256"
+            ],
+            "properties": { "encoding": { "const": "zstd+bsdiff" } }
+          }
+        }
+      ]
+    }
+  }
+}

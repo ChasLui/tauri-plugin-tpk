@@ -1,0 +1,25 @@
+[package]
+name = "tpk-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Channel manifest fetching, update planning and resumable downloads."
+
+[dependencies]
+tpk-format.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+sha2.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+url.workspace = true
+log.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { version = "1", features = ["rt", "macros"] }

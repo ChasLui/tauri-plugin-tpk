@@ -9,7 +9,7 @@ title: API Reference
 Install:
 
 ```bash
-npm install tauri-plugin-hotswap-api
+npm install tauri-plugin-tpk-api
 ```
 
 All functions are `async` and return `Promise`s.
@@ -21,7 +21,7 @@ All functions are `async` and return `Promise`s.
 Check for an available update.
 
 ```typescript
-import { checkUpdate } from 'tauri-plugin-hotswap-api';
+import { checkUpdate } from 'tauri-plugin-tpk-api';
 
 const result = await checkUpdate();
 if (result.available) {
@@ -153,7 +153,7 @@ await notifyReady();
 Update runtime configuration. All fields are optional — only the fields you provide are changed. Takes effect on the next `checkUpdate()` call; no restart required.
 
 ```typescript
-import { configure } from 'tauri-plugin-hotswap-api';
+import { configure } from 'tauri-plugin-tpk-api';
 
 // Switch to the beta channel
 await configure({ channel: 'beta' });
@@ -185,7 +185,7 @@ interface ConfigureOptions {
 Get the current runtime configuration.
 
 ```typescript
-import { getConfig } from 'tauri-plugin-hotswap-api';
+import { getConfig } from 'tauri-plugin-tpk-api';
 
 const config = await getConfig();
 console.log(config.channel);   // "beta" | null
@@ -266,11 +266,11 @@ interface LifecycleEvent {
 
 ### Custom Resolvers
 
-Implement `HotswapResolver` to use any update source:
+Implement `TpkResolver` to use any update source:
 
 ```rust
-use tauri_plugin_hotswap::{HotswapResolver, CheckContext, HotswapManifest};
-use tauri_plugin_hotswap::error::Result;
+use tauri_plugin_tpk::{TpkResolver, CheckContext, TpkManifest};
+use tauri_plugin_tpk::error::Result;
 use std::pin::Pin;
 use std::future::Future;
 
@@ -278,11 +278,11 @@ struct MyResolver {
     // your state
 }
 
-impl HotswapResolver for MyResolver {
+impl TpkResolver for MyResolver {
     fn check(
         &self,
         ctx: &CheckContext,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<HotswapManifest>>> + Send>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Option<TpkManifest>>> + Send>> {
         let seq = ctx.current_sequence;
         let platform = ctx.platform;
         let arch = ctx.arch;
@@ -301,7 +301,7 @@ impl HotswapResolver for MyResolver {
 Use it with the builder:
 
 ```rust
-let (plugin, context) = HotswapBuilder::new("pubkey...")
+let (plugin, context) = TpkBuilder::new("pubkey...")
     .resolver(MyResolver { /* ... */ })
     .build(context)?;
 ```
@@ -309,7 +309,7 @@ let (plugin, context) = HotswapBuilder::new("pubkey...")
 ### Error Types
 
 ```rust
-use tauri_plugin_hotswap::Error;
+use tauri_plugin_tpk::Error;
 
 match err {
     Error::Network(msg) => {},           // HTTP request failed

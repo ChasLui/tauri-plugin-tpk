@@ -20,7 +20,7 @@ The plugin is designed with the assumption that **the network is hostile** and *
 | **MITM / downgrade attack** | HTTPS is enforced by default (`require_https: true`). Non-HTTPS URLs are rejected at both init and download time. |
 | **Oversized bundle (DoS)** | `Content-Length` checked upfront. Streaming download aborted if actual bytes exceed `max_bundle_size` (default 512 MB). |
 | **Malicious archive (path traversal)** | Every archive entry is validated: no `..` components, no absolute paths, must resolve within the extraction directory. Both tar.gz and zip. Leading `./` components are permitted (standard output of `tar -C dir .`). |
-| **Asset key escape** | Every asset key lookup in `HotswapAssets::get()` is validated before filesystem access. Only `Component::Normal` path components are allowed. |
+| **Asset key escape** | Every asset key lookup in `PackAssets::get()` is validated before filesystem access. Only `Component::Normal` path components are allowed. |
 | **Corrupted pointer file** | The `current` pointer must match the `seq-N` format. No path separators, no traversal. Validated on every read. |
 | **Crash loop after update** | The `notifyReady()` heartbeat pattern: an update is "unconfirmed" until the app calls `notifyReady()`. If the app crashes before that, the next launch automatically rolls back. |
 | **Stale cache after binary upgrade** | If the binary version is older than the cached bundle's `min_binary_version`, the cache is discarded. |
@@ -72,7 +72,7 @@ The **public key** (`RW...` line) goes in your config:
 ```json
 {
   "plugins": {
-    "hotswap": {
+    "tpk": {
       "pubkey": "<YOUR_MINISIGN_PUBKEY>"
     }
   }

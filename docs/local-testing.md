@@ -150,7 +150,7 @@ In `tauri.conf.json`:
 ```json
 {
   "plugins": {
-    "hotswap": {
+    "tpk": {
       "endpoint": "http://localhost:3333/api/ota/{{current_sequence}}",
       "pubkey": "YOUR_PUBLIC_KEY_FROM_STEP_1",
       "require_https": false

@@ -1,0 +1,45 @@
+[package]
+name = "tpk-format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "TPK/1 container, manifest and signature handling — the single source of truth for the on-disk pack format."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+sha2.workspace = true
+zip.workspace = true
+ruzstd.workspace = true
+minisign-verify.workspace = true
+base64.workspace = true
+globset.workspace = true
+unicode-normalization.workspace = true
+thiserror.workspace = true
+
+[features]
+default = []
+# Writing packs (CLI only): pulls in the C-backed zstd encoder and signing.
+pack = ["dep:zstd", "dep:ed25519-compact", "dep:blake2"]
+
+[dependencies.zstd]
+version = "0.14"
+optional = true
+
+[dependencies.ed25519-compact]
+workspace = true
+optional = true
+
+[dependencies.blake2]
+workspace = true
+optional = true
+
+[dev-dependencies]
+tempfile.workspace = true
+serde_json.workspace = true
+zip.workspace = true
+jsonschema.workspace = true

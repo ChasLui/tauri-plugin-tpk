@@ -43,20 +43,20 @@ jobs:
 
       - name: Format check
         if: runner.os == 'Linux'
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Clippy
         if: runner.os == 'Linux'
-        run: cargo clippy --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Test
-        run: cargo test --all-features
+        run: cargo test --workspace --all-features
 
       - name: Rustdoc
         if: runner.os == 'Linux'
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --workspace --no-deps --all-features
 
   coverage:
     name: Coverage
@@ -81,7 +81,7 @@ jobs:
           tool: cargo-llvm-cov
 
       - name: Generate coverage
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
@@ -104,9 +104,51 @@ jobs:
           node-version: 20
 
       - name: Install
-        working-directory: guest-js
+        working-directory: packages/tauri-plugin-tpk-api
         run: pnpm install --frozen-lockfile
 
       - name: Build
-        working-directory: guest-js
+        working-directory: packages/tauri-plugin-tpk-api
         run: pnpm build
+
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: "1.88"
+
+      - uses: Swatinem/rust-cache@8cbdedb5103daa674dcf46d3590fe06a76645684 # v2.8.0
+
+      # rust-version is a promise to downstream users; without this job it
+      # silently drifts as dependencies raise their own MSRV.
+      - name: Check against declared MSRV
+        run: cargo check --workspace --all-features
+
+  example:
+    name: Example app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@8cbdedb5103daa674dcf46d3590fe06a76645684 # v2.8.0
+
+      # examples/ is a separate workspace, so --workspace above never covers it.
+      # Without this job it rots unnoticed.
+      - name: Check example
+        run: cargo check --manifest-path examples/shell-app/src-tauri/Cargo.toml

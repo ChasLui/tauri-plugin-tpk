@@ -1,0 +1,24 @@
+[package]
+name = "tpk-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Command-line tool to pack, sign, verify and publish TPK content packs."
+
+[[bin]]
+name = "tpk"
+path = "src/main.rs"
+
+[dependencies]
+tpk-format = { workspace = true, features = ["pack"] }
+tpk-delta = { workspace = true, features = ["encode"] }
+clap.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+zip.workspace = true

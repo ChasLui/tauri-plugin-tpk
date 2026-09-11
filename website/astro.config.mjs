@@ -4,10 +4,11 @@ import starlightClientMermaid from '@pasqal-io/starlight-client-mermaid';
 import { ion } from 'starlight-ion-theme';
 
 export default defineConfig({
-  site: 'https://hotswap.kribl.io',
+  site: 'https://chaslui.github.io',
+  base: '/tauri-plugin-tpk',
   integrations: [
     starlight({
-      title: '\u{1F525}\u{1F504} tauri-plugin-hotswap',
+      title: '\u{1F525}\u{1F504} tauri-plugin-tpk',
       description: 'Open-source OTA frontend updates for Tauri v2',
       plugins: [
         starlightClientMermaid(),
@@ -18,11 +19,11 @@ export default defineConfig({
             links: [
               {
                 text: 'GitHub',
-                href: 'https://github.com/denniskribl/tauri-plugin-hotswap',
+                href: 'https://github.com/ChasLui/tauri-plugin-tpk',
               },
               {
                 text: 'npm',
-                href: 'https://www.npmjs.com/package/tauri-plugin-hotswap-api',
+                href: 'https://www.npmjs.com/package/tauri-plugin-tpk-api',
               },
             ],
           },
@@ -32,12 +33,12 @@ export default defineConfig({
         {
           icon: 'github',
           label: 'GitHub',
-          href: 'https://github.com/denniskribl/tauri-plugin-hotswap',
+          href: 'https://github.com/ChasLui/tauri-plugin-tpk',
         },
       ],
       editLink: {
         baseUrl:
-          'https://github.com/denniskribl/tauri-plugin-hotswap/edit/main/',
+          'https://github.com/ChasLui/tauri-plugin-tpk/edit/main/',
       },
       customCss: ['./src/styles/custom.css'],
       sidebar: [

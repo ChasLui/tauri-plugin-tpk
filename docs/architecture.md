@@ -4,7 +4,7 @@ title: Architecture
 
 # 🏗️ Architecture
 
-This document explains how `tauri-plugin-hotswap` works internally.
+This document explains how `tauri-plugin-tpk` works internally.
 
 ---
 
@@ -22,7 +22,7 @@ flowchart TD
     • Check confirmed flag
     • Auto-rollback if needed"] --> C
     C["Swap Context Assets
-    context.assets = HotswapAssets
+    context.assets = PackAssets
     (embedded → filesystem-first)"] --> D
     D["App runs normally
     WebView loads from tauri://localhost"]
@@ -72,7 +72,7 @@ When the WebView requests an asset (e.g. `/index.html`):
 
 ```mermaid
 flowchart TD
-    A["HotswapAssets::get('/index.html')"] --> B{"Validate key
+    A["PackAssets::get('/index.html')"] --> B{"Validate key
     (no .., no absolute paths)"}
     B -->|valid| C{"Try: {ota_dir}/index.html"}
     B -->|invalid| G["Reject request"]

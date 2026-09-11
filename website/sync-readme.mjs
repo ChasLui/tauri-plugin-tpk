@@ -24,7 +24,7 @@ title: README
 description: Quickstart, install snippets, and feature overview.
 ---
 
-> This page mirrors the [GitHub README](https://github.com/denniskribl/tauri-plugin-hotswap). For the full docs, use the sidebar.
+> This page mirrors the [GitHub README](https://github.com/ChasLui/tauri-plugin-tpk). For the full docs, use the sidebar.
 
 `;
 

@@ -13,7 +13,6 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
-    "bzip2-1.0.6",
     "CC0-1.0",
     "CDLA-Permissive-2.0",
     "ISC",
@@ -25,6 +24,15 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# The runtime must stay free of C toolchain dependencies: zstd decoding uses the
+# pure-Rust `ruzstd`, and the C encoder exists only for building packs. `graph.
+# all-features` turns on tpk-format/pack, so zstd is always in the graph here —
+# these entries pin *who* may reach it.
+deny = [
+    { crate = "zstd", wrappers = ["tpk-format"] },
+    { crate = "zstd-safe", wrappers = ["zstd"] },
+    { crate = "zstd-sys", wrappers = ["zstd-safe"] },
+]
 
 [sources]
 unknown-registry = "deny"

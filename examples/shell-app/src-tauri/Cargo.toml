@@ -1,0 +1,17 @@
+[package]
+name = "tpk-example"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "tpk_example"
+crate-type = ["staticlib", "cdylib", "lib"]
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-tpk = { path = "../../../crates/tauri-plugin-tpk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

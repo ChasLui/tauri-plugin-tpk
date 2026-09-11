@@ -13,7 +13,7 @@ updates:
         patterns: ["*"]
 
   - package-ecosystem: npm
-    directory: /guest-js
+    directory: /packages/tauri-plugin-tpk-api
     schedule:
       interval: weekly
     cooldown:

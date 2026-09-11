@@ -1,0 +1,21 @@
+[package]
+name = "tpk-delta"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "bsdiff patch application (runtime) and generation (CLI) for TPK delta entries."
+
+[dependencies]
+bsdiff.workspace = true
+thiserror.workspace = true
+
+[features]
+default = []
+# Patch generation, used by tpk-cli only.
+encode = []
+
+[dev-dependencies]
+tempfile.workspace = true

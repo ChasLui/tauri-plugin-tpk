@@ -1,12 +1,12 @@
 ---
-title: tauri-plugin-hotswap
+title: tauri-plugin-tpk
 ---
 
-# 🔥🔄 tauri-plugin-hotswap
+# 🔥🔄 tauri-plugin-tpk
 
 ✨ Ship frontend fixes in minutes
 
-`tauri-plugin-hotswap` is a fully open-source OTA plugin for Tauri v2 that lets you update frontend assets without rebuilding your native binary. Bring your own server, bring your own signing keys, and keep full control of your release process. 🚀
+`tauri-plugin-tpk` is a fully open-source OTA plugin for Tauri v2 that lets you update frontend assets without rebuilding your native binary. Bring your own server, bring your own signing keys, and keep full control of your release process. 🚀
 
 ## Why teams use hotswap
 
@@ -34,4 +34,4 @@ If you are new to the project:
 3. Follow **Creating Bundles**
 4. Wire your frontend with **API Reference**
 
-For quick install snippets and repository context, see the [GitHub README](https://github.com/denniskribl/tauri-plugin-hotswap).
+For quick install snippets and repository context, see the [GitHub README](https://github.com/ChasLui/tauri-plugin-tpk).

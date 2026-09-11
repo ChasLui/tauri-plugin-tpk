@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ChasLui/tauri-plugin-tpk/spec/json-schema/store-state.schema.json",
+  "title": "TPK store state",
+  "description": "state.json in $APPLOCALDATA/tpk/. Each of the three states names the layers it consists of by content hash; promotion is a single atomic write of this file, never a sequence of renames. Layers live in layers/<file_sha256>.tpk and are garbage-collected by reference counting.",
+  "type": "object",
+  "required": ["spec", "pointer", "install_id"],
+  "properties": {
+    "spec": { "const": "tpk-state/1" },
+    "pointer": {
+      "enum": ["committed", "booting"],
+      "description": "Which revision the running process loaded."
+    },
+    "install_id": {
+      "type": "string",
+      "description": "Random UUIDv4 generated on first launch. Used for staged-rollout bucketing; survives reset so a device does not re-roll its bucket."
+    },
+    "staged": { "$ref": "#/$defs/revision" },
+    "booting": { "$ref": "#/$defs/revision" },
+    "committed": { "$ref": "#/$defs/revision" },
+    "boot_attempts": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "How many times the current booting revision has started without being acknowledged. Below the threshold the revision is retried rather than rolled back: an OS kill, a power loss or a user quitting the app are ordinary events on mobile and must not be mistaken for a bad pack. Cleared by notify_ready."
+    },
+    "consecutive_rollbacks": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "At the threshold the client disables auto-check and auto-download and reports degraded status. Blacklisting only breaks the loop for one pack; this breaks it for the device."
+    },
+    "last_watermark": {
+      "type": "object",
+      "additionalProperties": { "type": "integer", "minimum": 0 },
+      "default": {},
+      "description": "Highest watermark seen, keyed by channel. A single scalar would make a stable->beta->stable switch discard every stable manifest forever."
+    },
+    "min_key_epoch": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Monotonic floor on signing key generation. Mirrored in keys-cache.json for audit."
+    },
+    "last_error": {
+      "type": ["object", "null"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^E_[A-Z]+$" },
+        "message": { "type": "string" },
+        "at": { "type": "string" }
+      }
+    }
+  },
+  "$defs": {
+    "revision": {
+      "type": ["object", "null"],
+      "required": ["rev", "layers"],
+      "properties": {
+        "rev": { "type": "string", "pattern": "^rev-[0-9]+$" },
+        "layers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "kind", "version_code", "file_sha256"],
+            "properties": {
+              "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
+              "kind": { "enum": ["base", "patch", "dlc", "mod"] },
+              "version_code": { "type": "integer", "minimum": 1 },
+              "file_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "Also the file name in layers/. Verified once when staged, then tracked by (size, mtime, inode): re-hashing every layer at boot is O(bytes) and blows the startup budget."
+              },
+              "size": { "type": "integer", "minimum": 0 },
+              "mtime_ns": { "type": "integer", "minimum": 0 },
+              "verified_at": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

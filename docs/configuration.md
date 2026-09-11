@@ -13,7 +13,7 @@ There are three ways to configure the plugin, from simplest to most flexible.
 ```json
 {
   "plugins": {
-    "hotswap": {
+    "tpk": {
       "endpoint": "https://example.com/api/updates/{{current_sequence}}",
       "pubkey": "<YOUR_MINISIGN_PUBKEY>",
       "channel": "production",
@@ -34,17 +34,17 @@ There are three ways to configure the plugin, from simplest to most flexible.
 
 ```rust
 let context = tauri::generate_context!();
-let (plugin, context) = tauri_plugin_hotswap::init(context)?;
+let (plugin, context) = tauri_plugin_tpk::init(context)?;
 ```
 
 ## Option B: Programmatic config
 
 ```rust
-use tauri_plugin_hotswap::HotswapConfig;
+use tauri_plugin_tpk::TpkConfig;
 
-let (plugin, context) = tauri_plugin_hotswap::init_with_config(
+let (plugin, context) = tauri_plugin_tpk::init_with_config(
     context,
-    HotswapConfig::new("<YOUR_MINISIGN_PUBKEY>")
+    TpkConfig::new("<YOUR_MINISIGN_PUBKEY>")
         .endpoint("https://example.com/api/updates/{{current_sequence}}")
         .channel("production")
         .header("Authorization", "Bearer <token>"),
@@ -54,20 +54,20 @@ let (plugin, context) = tauri_plugin_hotswap::init_with_config(
 ## Option C: Builder with custom resolver
 
 ```rust
-use tauri_plugin_hotswap::{HotswapBuilder, StaticFileResolver};
+use tauri_plugin_tpk::{TpkBuilder, StaticFileResolver};
 
-let (plugin, context) = HotswapBuilder::new("<YOUR_MINISIGN_PUBKEY>")
+let (plugin, context) = TpkBuilder::new("<YOUR_MINISIGN_PUBKEY>")
     .resolver(StaticFileResolver::new("https://cdn.example.com/latest.json"))
     .channel("production")
     .header("Authorization", "Bearer <token>")
     .max_bundle_size(256 * 1024 * 1024)
     .max_retries(5)
     .require_https(true)
-    .binary_cache_policy(tauri_plugin_hotswap::BinaryCachePolicyKind::KeepCompatible)
-    .confirmation_policy(tauri_plugin_hotswap::ConfirmationPolicyKind::GracePeriod {
+    .binary_cache_policy(tauri_plugin_tpk::BinaryCachePolicyKind::KeepCompatible)
+    .confirmation_policy(tauri_plugin_tpk::ConfirmationPolicyKind::GracePeriod {
         max_unconfirmed_launches: 3,
     })
-    .rollback_policy(tauri_plugin_hotswap::RollbackPolicyKind::LatestConfirmed)
+    .rollback_policy(tauri_plugin_tpk::RollbackPolicyKind::LatestConfirmed)
     .max_retained_versions(3)
     .build(context)?;
 ```
@@ -101,7 +101,7 @@ Channels let you route different users to different update streams.
 ```json
 {
   "plugins": {
-    "hotswap": {
+    "tpk": {
       "channel": "production"
     }
   }
@@ -111,7 +111,7 @@ Channels let you route different users to different update streams.
 ### Switch at runtime
 
 ```typescript
-import { configure, getConfig } from 'tauri-plugin-hotswap-api';
+import { configure, getConfig } from 'tauri-plugin-tpk-api';
 
 // Opt into beta updates
 await configure({ channel: 'beta' });
@@ -133,7 +133,7 @@ The channel is sent as a `&channel=beta` query parameter on check requests. Your
 You can switch the update endpoint at runtime without restarting the app:
 
 ```typescript
-import { configure } from 'tauri-plugin-hotswap-api';
+import { configure } from 'tauri-plugin-tpk-api';
 
 // Point to a different update server at runtime
 await configure({
@@ -161,7 +161,7 @@ Headers are sent on both check and download requests. Use them for:
 ```json
 {
   "plugins": {
-    "hotswap": {
+    "tpk": {
       "headers": {
         "Authorization": "Bearer eyJhbGciOi..."
       }
@@ -173,7 +173,7 @@ Headers are sent on both check and download requests. Use them for:
 ### From Rust
 
 ```rust
-HotswapConfig::new("pubkey...")
+TpkConfig::new("pubkey...")
     .endpoint("https://...")
     .header("Authorization", "Bearer eyJhbGciOi...")
     .header("X-API-Key", "sk_live_...")
@@ -182,7 +182,7 @@ HotswapConfig::new("pubkey...")
 ### Update headers at runtime
 
 ```typescript
-import { configure } from 'tauri-plugin-hotswap-api';
+import { configure } from 'tauri-plugin-tpk-api';
 
 // Merge headers: set or overwrite a key (other existing headers are kept)
 await configure({

@@ -1,17 +1,22 @@
 target/
 node_modules/
 dist/
-guest-js/dist/
+packages/tauri-plugin-tpk-api/dist/
 website/dist/
 website/.astro/
 **/gen/schemas/
-book/
 *.swp
 *.swo
 .DS_Store
 .claude/
-guest-js/README.md
+packages/tauri-plugin-tpk-api/README.md
 website/src/content/docs/readme.md
-examples/basic/test-server/
+examples/shell-app/test-server/
 **/gen/apple/
 **/gen/android/
+
+# copied in by the release workflow so `cargo package` can embed it
+crates/tauri-plugin-tpk/README.md
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/

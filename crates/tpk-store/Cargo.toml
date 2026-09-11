@@ -1,0 +1,23 @@
+[package]
+name = "tpk-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "On-disk layer pool, three-state pointer machine, blacklist and delta materialization."
+
+[dependencies]
+tpk-format.workspace = true
+tpk-delta.workspace = true
+tpk-resolve.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+sha2.workspace = true
+log.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

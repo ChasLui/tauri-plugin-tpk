@@ -4,7 +4,7 @@ title: Advanced Policies
 
 # Advanced Policies
 
-The plugin exposes four configurable policy traits that govern OTA lifecycle decisions. Most users only need the config knobs in `tauri.conf.json` — this guide is for advanced customization via the `HotswapBuilder`.
+The plugin exposes four configurable policy traits that govern OTA lifecycle decisions. Most users only need the config knobs in `tauri.conf.json` — this guide is for advanced customization via the `TpkBuilder`.
 
 ---
 
@@ -24,7 +24,7 @@ The plugin exposes four configurable policy traits that govern OTA lifecycle dec
 ```json
 {
   "plugins": {
-    "hotswap": {
+    "tpk": {
       "binary_cache_policy": "keep_compatible",
       "confirmation_policy": { "grace_period": { "max_unconfirmed_launches": 3 } },
       "rollback_policy": "latest_confirmed",
@@ -39,12 +39,12 @@ The plugin exposes four configurable policy traits that govern OTA lifecycle dec
 ## Builder-based (advanced path)
 
 ```rust
-use tauri_plugin_hotswap::{
-    HotswapBuilder, BinaryCachePolicyKind, ConfirmationPolicyKind,
+use tauri_plugin_tpk::{
+    TpkBuilder, BinaryCachePolicyKind, ConfirmationPolicyKind,
     RollbackPolicyKind, StaticFileResolver,
 };
 
-let (plugin, context) = HotswapBuilder::new("<PUBKEY>")
+let (plugin, context) = TpkBuilder::new("<PUBKEY>")
     .resolver(StaticFileResolver::new("https://cdn.example.com/latest.json"))
     .binary_cache_policy(BinaryCachePolicyKind::KeepCompatible)
     .confirmation_policy(ConfirmationPolicyKind::GracePeriod {

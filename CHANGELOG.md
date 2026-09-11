@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] — unreleased
+
+### This is a different package
+
+`tauri-plugin-hotswap` / `tauri-plugin-hotswap-api` are no longer maintained.
+This project continues as `tauri-plugin-tpk` / `tauri-plugin-tpk-api`, implementing
+the TPK/1 specification. **There is no upgrade path**: the on-disk layout, the
+manifest format, the command names and the JS API are all incompatible.
+
+### Added
+
+- **TPK/1 pack format** (`tpk-format`) — ZIP container plus a signed
+  `tpk-manifest.json`. Per-entry `full` / `delta` / `delete` operations, so a
+  release can be a full base, a file-level patch, or a set of tombstones.
+- **Signature handling** — minisign (Ed25519) verification and production, with a
+  `key_epoch` on every trusted key. Clients keep a monotonic floor, which is what
+  lets a leaked key be retired without waiting for every device to drop it from
+  its list.
+- **`tpk` CLI** — `keygen`, `inspect` and `verify`, with the specification's exit
+  codes (0 / 2 verification failure / 3 usage).
+- **JSON Schemas** under `spec/json-schema/`, checked against the Rust parsers by
+  a test so the two cannot drift apart.
+- **Workspace layout** — seven crates with a strictly one-way dependency graph;
+  `tpk-client` deliberately cannot reach `tpk-store`.
+- **MSRV 1.88**, enforced by a CI job rather than left to drift.
+
+### Changed
+
+- Runtime zstd decoding uses pure-Rust `ruzstd`; `zip` is pinned to
+  `default-features = false` so its default feature set cannot drag `zstd-sys`,
+  `bzip2`, `lzma-rust2` and `ppmd-rust` into the runtime. `deny.toml` pins that
+  boundary with a `wrappers` allowlist.
+- The README no longer describes the plugin as a way to skip app store review.
+  Content updates are governed by Apple DPLA §3.3.1(B) and Google Play's Device
+  and Network Abuse policy; see `docs/security.md`.
+
+### Removed
+
+- Everything from the hotswap implementation: the `seq-N` directory layout, the
+  `current` pointer file, tar.gz bundles, the `apply` / `activate` split, and the
+  runtime `configure` command.
+
 ## [0.0.4] — 2026-04-09
 
 ### Added
