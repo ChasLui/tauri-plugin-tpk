@@ -1,0 +1,8 @@
+"$schema" = "schemas/schema.json"
+
+[[set]]
+identifier = "allow-mods"
+description = """
+Lets the frontend enable or disable mod layers. Nothing loads mod layers today and the command refuses; the set exists so the capability name is reserved rather than being invented later with different semantics. Desktop only — see `spec/tpk-v1.md` appendix A.4.
+"""
+permissions = ["allow-set-mod-enabled"]

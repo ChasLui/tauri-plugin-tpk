@@ -21,8 +21,14 @@
   },
   "plugins": {
     "tpk": {
-      "endpoint": "https://example.com/api/ota/{{current_sequence}}",
-      "pubkey": "REPLACE_WITH_YOUR_PUBKEY"
+      "manifest_url": "https://cdn.example.com/tpk/{{channel}}/latest.json",
+      "pubkeys": [
+        {
+          "key": "REPLACE_WITH_YOUR_PUBKEY",
+          "epoch": 1
+        }
+      ],
+      "channel": "stable"
     }
   }
 }

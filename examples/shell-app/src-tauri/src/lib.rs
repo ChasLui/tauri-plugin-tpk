@@ -1,36 +1,17 @@
-use tauri::App;
-
-pub fn run_app(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
-    let _ = app;
-    Ok(())
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let context = tauri::generate_context!();
+    let mut context = tauri::generate_context!();
 
-    // Option A: Read config from tauri.conf.json (recommended)
-    let (tpk_plugin, context) = tauri_plugin_tpk::init(context)
-        .expect("failed to initialize tpk plugin");
-
-    // Option B: Explicit config
-    // let (tpk_plugin, context) = tauri_plugin_tpk::init_with_config(
-    //     context,
-    //     tauri_plugin_tpk::HotswapConfig::new("REPLACE_WITH_YOUR_PUBKEY")
-    //         .endpoint("https://example.com/api/ota/{{current_sequence}}"),
-    // ).expect("failed to initialize tpk plugin");
-
-    // Option C: Custom resolver
-    // let (tpk_plugin, context) = tauri_plugin_tpk::HotswapBuilder::new("YOUR_PUBKEY")
-    //     .resolver(tauri_plugin_tpk::StaticFileResolver::new(
-    //         "https://cdn.example.com/ota/latest.json",
-    //     ))
-    //     .build(context)
-    //     .expect("failed to initialize tpk plugin");
+    // `attach` swaps the asset provider before the app is built. It resolves no
+    // paths and opens no files — on Android the data directory is not reachable
+    // this early — so everything stateful happens in the plugin's setup hook,
+    // which still runs before any window exists.
+    let tpk = tauri_plugin_tpk::attach(&mut context);
 
     tauri::Builder::default()
-        .plugin(tpk_plugin)
-        .setup(|app| run_app(app))
+        // Register tpk first so its setup runs before anything that might want
+        // to read assets.
+        .plugin(tauri_plugin_tpk::init(tpk))
         .run(context)
         .expect("error while running tauri application");
 }

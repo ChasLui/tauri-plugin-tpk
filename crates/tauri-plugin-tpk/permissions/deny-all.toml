@@ -1,0 +1,13 @@
+"$schema" = "schemas/schema.json"
+
+[[set]]
+identifier = "deny-all"
+description = "Blocks every tpk command for a window."
+permissions = [
+    "deny-check",
+    "deny-download",
+    "deny-notify-ready",
+    "deny-status",
+    "deny-reset",
+    "deny-set-mod-enabled",
+]

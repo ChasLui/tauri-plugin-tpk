@@ -295,118 +295,100 @@
       "type": "string",
       "oneOf": [
         {
-          "description": "Enables the hotswap_activate command without any pre-configured scope.",
+          "description": "Lets the frontend enable or disable mod layers. Nothing loads mod layers today and the command refuses; the set exists so the capability name is reserved rather than being invented later with different semantics. Desktop only — see `spec/tpk-v1.md` appendix A.4.\n\n#### This permission set includes:\n\n- `allow-set-mod-enabled`",
           "type": "string",
-          "const": "allow-hotswap-activate",
-          "markdownDescription": "Enables the hotswap_activate command without any pre-configured scope."
+          "const": "allow-mods",
+          "markdownDescription": "Lets the frontend enable or disable mod layers. Nothing loads mod layers today and the command refuses; the set exists so the capability name is reserved rather than being invented later with different semantics. Desktop only — see `spec/tpk-v1.md` appendix A.4.\n\n#### This permission set includes:\n\n- `allow-set-mod-enabled`"
         },
         {
-          "description": "Denies the hotswap_activate command without any pre-configured scope.",
+          "description": "Lets the frontend discard downloaded content, optionally including the blacklist. A support path: clearing the blacklist re-enables installing a release that was previously found to be broken, so grant it deliberately.\n\n#### This permission set includes:\n\n- `allow-reset`",
           "type": "string",
-          "const": "deny-hotswap-activate",
-          "markdownDescription": "Denies the hotswap_activate command without any pre-configured scope."
+          "const": "allow-reset",
+          "markdownDescription": "Lets the frontend discard downloaded content, optionally including the blacklist. A support path: clearing the blacklist re-enables installing a release that was previously found to be broken, so grant it deliberately.\n\n#### This permission set includes:\n\n- `allow-reset`"
         },
         {
-          "description": "Enables the hotswap_apply command without any pre-configured scope.",
+          "description": "Enables the check command without any pre-configured scope.",
           "type": "string",
-          "const": "allow-hotswap-apply",
-          "markdownDescription": "Enables the hotswap_apply command without any pre-configured scope."
+          "const": "allow-check",
+          "markdownDescription": "Enables the check command without any pre-configured scope."
         },
         {
-          "description": "Denies the hotswap_apply command without any pre-configured scope.",
+          "description": "Denies the check command without any pre-configured scope.",
           "type": "string",
-          "const": "deny-hotswap-apply",
-          "markdownDescription": "Denies the hotswap_apply command without any pre-configured scope."
+          "const": "deny-check",
+          "markdownDescription": "Denies the check command without any pre-configured scope."
         },
         {
-          "description": "Enables the hotswap_check command without any pre-configured scope.",
+          "description": "Enables the download command without any pre-configured scope.",
           "type": "string",
-          "const": "allow-hotswap-check",
-          "markdownDescription": "Enables the hotswap_check command without any pre-configured scope."
+          "const": "allow-download",
+          "markdownDescription": "Enables the download command without any pre-configured scope."
         },
         {
-          "description": "Denies the hotswap_check command without any pre-configured scope.",
+          "description": "Denies the download command without any pre-configured scope.",
           "type": "string",
-          "const": "deny-hotswap-check",
-          "markdownDescription": "Denies the hotswap_check command without any pre-configured scope."
+          "const": "deny-download",
+          "markdownDescription": "Denies the download command without any pre-configured scope."
         },
         {
-          "description": "Enables the hotswap_configure command without any pre-configured scope.",
+          "description": "Enables the notify_ready command without any pre-configured scope.",
           "type": "string",
-          "const": "allow-hotswap-configure",
-          "markdownDescription": "Enables the hotswap_configure command without any pre-configured scope."
+          "const": "allow-notify-ready",
+          "markdownDescription": "Enables the notify_ready command without any pre-configured scope."
         },
         {
-          "description": "Denies the hotswap_configure command without any pre-configured scope.",
+          "description": "Denies the notify_ready command without any pre-configured scope.",
           "type": "string",
-          "const": "deny-hotswap-configure",
-          "markdownDescription": "Denies the hotswap_configure command without any pre-configured scope."
+          "const": "deny-notify-ready",
+          "markdownDescription": "Denies the notify_ready command without any pre-configured scope."
         },
         {
-          "description": "Enables the hotswap_current_version command without any pre-configured scope.",
+          "description": "Enables the reset command without any pre-configured scope.",
           "type": "string",
-          "const": "allow-hotswap-current-version",
-          "markdownDescription": "Enables the hotswap_current_version command without any pre-configured scope."
+          "const": "allow-reset",
+          "markdownDescription": "Enables the reset command without any pre-configured scope."
         },
         {
-          "description": "Denies the hotswap_current_version command without any pre-configured scope.",
+          "description": "Denies the reset command without any pre-configured scope.",
           "type": "string",
-          "const": "deny-hotswap-current-version",
-          "markdownDescription": "Denies the hotswap_current_version command without any pre-configured scope."
+          "const": "deny-reset",
+          "markdownDescription": "Denies the reset command without any pre-configured scope."
         },
         {
-          "description": "Enables the hotswap_download command without any pre-configured scope.",
+          "description": "Enables the set_mod_enabled command without any pre-configured scope.",
           "type": "string",
-          "const": "allow-hotswap-download",
-          "markdownDescription": "Enables the hotswap_download command without any pre-configured scope."
+          "const": "allow-set-mod-enabled",
+          "markdownDescription": "Enables the set_mod_enabled command without any pre-configured scope."
         },
         {
-          "description": "Denies the hotswap_download command without any pre-configured scope.",
+          "description": "Denies the set_mod_enabled command without any pre-configured scope.",
           "type": "string",
-          "const": "deny-hotswap-download",
-          "markdownDescription": "Denies the hotswap_download command without any pre-configured scope."
+          "const": "deny-set-mod-enabled",
+          "markdownDescription": "Denies the set_mod_enabled command without any pre-configured scope."
         },
         {
-          "description": "Enables the hotswap_get_config command without any pre-configured scope.",
+          "description": "Enables the status command without any pre-configured scope.",
           "type": "string",
-          "const": "allow-hotswap-get-config",
-          "markdownDescription": "Enables the hotswap_get_config command without any pre-configured scope."
+          "const": "allow-status",
+          "markdownDescription": "Enables the status command without any pre-configured scope."
         },
         {
-          "description": "Denies the hotswap_get_config command without any pre-configured scope.",
+          "description": "Denies the status command without any pre-configured scope.",
           "type": "string",
-          "const": "deny-hotswap-get-config",
-          "markdownDescription": "Denies the hotswap_get_config command without any pre-configured scope."
+          "const": "deny-status",
+          "markdownDescription": "Denies the status command without any pre-configured scope."
         },
         {
-          "description": "Enables the hotswap_notify_ready command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-hotswap-notify-ready",
-          "markdownDescription": "Enables the hotswap_notify_ready command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the hotswap_notify_ready command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-hotswap-notify-ready",
-          "markdownDescription": "Denies the hotswap_notify_ready command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the hotswap_rollback command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-hotswap-rollback",
-          "markdownDescription": "Enables the hotswap_rollback command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the hotswap_rollback command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-hotswap-rollback",
-          "markdownDescription": "Denies the hotswap_rollback command without any pre-configured scope."
-        },
-        {
-          "description": "Default permissions for the Hotswap plugin\n#### This default permission set includes:\n\n- `allow-hotswap-check`\n- `allow-hotswap-apply`\n- `allow-hotswap-download`\n- `allow-hotswap-activate`\n- `allow-hotswap-rollback`\n- `allow-hotswap-current-version`\n- `allow-hotswap-notify-ready`\n- `allow-hotswap-configure`\n- `allow-hotswap-get-config`",
+          "description": "What an ordinary frontend needs: poll for updates, download them, acknowledge that the running revision works, and read the current state. Notably absent is `reset`, which can clear the blacklist.\n\n#### This default permission set includes:\n\n- `allow-check`\n- `allow-download`\n- `allow-notify-ready`\n- `allow-status`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default permissions for the Hotswap plugin\n#### This default permission set includes:\n\n- `allow-hotswap-check`\n- `allow-hotswap-apply`\n- `allow-hotswap-download`\n- `allow-hotswap-activate`\n- `allow-hotswap-rollback`\n- `allow-hotswap-current-version`\n- `allow-hotswap-notify-ready`\n- `allow-hotswap-configure`\n- `allow-hotswap-get-config`"
+          "markdownDescription": "What an ordinary frontend needs: poll for updates, download them, acknowledge that the running revision works, and read the current state. Notably absent is `reset`, which can clear the blacklist.\n\n#### This default permission set includes:\n\n- `allow-check`\n- `allow-download`\n- `allow-notify-ready`\n- `allow-status`"
+        },
+        {
+          "description": "Blocks every tpk command for a window.\n#### This permission set includes:\n\n- `deny-check`\n- `deny-download`\n- `deny-notify-ready`\n- `deny-status`\n- `deny-reset`\n- `deny-set-mod-enabled`",
+          "type": "string",
+          "const": "deny-all",
+          "markdownDescription": "Blocks every tpk command for a window.\n#### This permission set includes:\n\n- `deny-check`\n- `deny-download`\n- `deny-notify-ready`\n- `deny-status`\n- `deny-reset`\n- `deny-set-mod-enabled`"
         }
       ]
     }

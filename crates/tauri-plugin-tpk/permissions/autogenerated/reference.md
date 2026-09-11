@@ -1,18 +1,13 @@
 ## Default Permission
 
-Default permissions for the Hotswap plugin
+What an ordinary frontend needs: poll for updates, download them, acknowledge that the running revision works, and read the current state. Notably absent is `reset`, which can clear the blacklist.
 
 #### This default permission set includes the following:
 
-- `allow-hotswap-check`
-- `allow-hotswap-apply`
-- `allow-hotswap-download`
-- `allow-hotswap-activate`
-- `allow-hotswap-rollback`
-- `allow-hotswap-current-version`
-- `allow-hotswap-notify-ready`
-- `allow-hotswap-configure`
-- `allow-hotswap-get-config`
+- `allow-check`
+- `allow-download`
+- `allow-notify-ready`
+- `allow-status`
 
 ## Permission Table
 
@@ -26,25 +21,13 @@ Default permissions for the Hotswap plugin
 <tr>
 <td>
 
-`tpk:allow-hotswap-activate`
+`tpk:allow-mods`
 
 </td>
 <td>
 
-Enables the hotswap_activate command without any pre-configured scope.
+Lets the frontend enable or disable mod layers. Nothing loads mod layers today and the command refuses; the set exists so the capability name is reserved rather than being invented later with different semantics. Desktop only — see `spec/tpk-v1.md` appendix A.4.
 
-</td>
-</tr>
-
-<tr>
-<td>
-
-`tpk:deny-hotswap-activate`
-
-</td>
-<td>
-
-Denies the hotswap_activate command without any pre-configured scope.
 
 </td>
 </tr>
@@ -52,25 +35,13 @@ Denies the hotswap_activate command without any pre-configured scope.
 <tr>
 <td>
 
-`tpk:allow-hotswap-apply`
+`tpk:allow-reset`
 
 </td>
 <td>
 
-Enables the hotswap_apply command without any pre-configured scope.
+Lets the frontend discard downloaded content, optionally including the blacklist. A support path: clearing the blacklist re-enables installing a release that was previously found to be broken, so grant it deliberately.
 
-</td>
-</tr>
-
-<tr>
-<td>
-
-`tpk:deny-hotswap-apply`
-
-</td>
-<td>
-
-Denies the hotswap_apply command without any pre-configured scope.
 
 </td>
 </tr>
@@ -78,25 +49,12 @@ Denies the hotswap_apply command without any pre-configured scope.
 <tr>
 <td>
 
-`tpk:allow-hotswap-check`
+`tpk:allow-check`
 
 </td>
 <td>
 
-Enables the hotswap_check command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`tpk:deny-hotswap-check`
-
-</td>
-<td>
-
-Denies the hotswap_check command without any pre-configured scope.
+Enables the check command without any pre-configured scope.
 
 </td>
 </tr>
@@ -104,25 +62,12 @@ Denies the hotswap_check command without any pre-configured scope.
 <tr>
 <td>
 
-`tpk:allow-hotswap-configure`
+`tpk:deny-check`
 
 </td>
 <td>
 
-Enables the hotswap_configure command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`tpk:deny-hotswap-configure`
-
-</td>
-<td>
-
-Denies the hotswap_configure command without any pre-configured scope.
+Denies the check command without any pre-configured scope.
 
 </td>
 </tr>
@@ -130,25 +75,12 @@ Denies the hotswap_configure command without any pre-configured scope.
 <tr>
 <td>
 
-`tpk:allow-hotswap-current-version`
+`tpk:allow-download`
 
 </td>
 <td>
 
-Enables the hotswap_current_version command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`tpk:deny-hotswap-current-version`
-
-</td>
-<td>
-
-Denies the hotswap_current_version command without any pre-configured scope.
+Enables the download command without any pre-configured scope.
 
 </td>
 </tr>
@@ -156,25 +88,12 @@ Denies the hotswap_current_version command without any pre-configured scope.
 <tr>
 <td>
 
-`tpk:allow-hotswap-download`
+`tpk:deny-download`
 
 </td>
 <td>
 
-Enables the hotswap_download command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`tpk:deny-hotswap-download`
-
-</td>
-<td>
-
-Denies the hotswap_download command without any pre-configured scope.
+Denies the download command without any pre-configured scope.
 
 </td>
 </tr>
@@ -182,25 +101,12 @@ Denies the hotswap_download command without any pre-configured scope.
 <tr>
 <td>
 
-`tpk:allow-hotswap-get-config`
+`tpk:allow-notify-ready`
 
 </td>
 <td>
 
-Enables the hotswap_get_config command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`tpk:deny-hotswap-get-config`
-
-</td>
-<td>
-
-Denies the hotswap_get_config command without any pre-configured scope.
+Enables the notify_ready command without any pre-configured scope.
 
 </td>
 </tr>
@@ -208,25 +114,12 @@ Denies the hotswap_get_config command without any pre-configured scope.
 <tr>
 <td>
 
-`tpk:allow-hotswap-notify-ready`
+`tpk:deny-notify-ready`
 
 </td>
 <td>
 
-Enables the hotswap_notify_ready command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`tpk:deny-hotswap-notify-ready`
-
-</td>
-<td>
-
-Denies the hotswap_notify_ready command without any pre-configured scope.
+Denies the notify_ready command without any pre-configured scope.
 
 </td>
 </tr>
@@ -234,12 +127,12 @@ Denies the hotswap_notify_ready command without any pre-configured scope.
 <tr>
 <td>
 
-`tpk:allow-hotswap-rollback`
+`tpk:allow-reset`
 
 </td>
 <td>
 
-Enables the hotswap_rollback command without any pre-configured scope.
+Enables the reset command without any pre-configured scope.
 
 </td>
 </tr>
@@ -247,12 +140,77 @@ Enables the hotswap_rollback command without any pre-configured scope.
 <tr>
 <td>
 
-`tpk:deny-hotswap-rollback`
+`tpk:deny-reset`
 
 </td>
 <td>
 
-Denies the hotswap_rollback command without any pre-configured scope.
+Denies the reset command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tpk:allow-set-mod-enabled`
+
+</td>
+<td>
+
+Enables the set_mod_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tpk:deny-set-mod-enabled`
+
+</td>
+<td>
+
+Denies the set_mod_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tpk:allow-status`
+
+</td>
+<td>
+
+Enables the status command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tpk:deny-status`
+
+</td>
+<td>
+
+Denies the status command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tpk:deny-all`
+
+</td>
+<td>
+
+Blocks every tpk command for a window.
 
 </td>
 </tr>

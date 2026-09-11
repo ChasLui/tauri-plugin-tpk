@@ -1,13 +1,12 @@
+"$schema" = "schemas/schema.json"
+
 [default]
-description = "Default permissions for the Hotswap plugin"
+description = """
+What an ordinary frontend needs: poll for updates, download them, acknowledge that the running revision works, and read the current state. Notably absent is `reset`, which can clear the blacklist.
+"""
 permissions = [
-    "allow-hotswap-check",
-    "allow-hotswap-apply",
-    "allow-hotswap-download",
-    "allow-hotswap-activate",
-    "allow-hotswap-rollback",
-    "allow-hotswap-current-version",
-    "allow-hotswap-notify-ready",
-    "allow-hotswap-configure",
-    "allow-hotswap-get-config",
+    "allow-check",
+    "allow-download",
+    "allow-notify-ready",
+    "allow-status",
 ]

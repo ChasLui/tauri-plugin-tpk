@@ -1,0 +1,8 @@
+"$schema" = "schemas/schema.json"
+
+[[set]]
+identifier = "allow-reset"
+description = """
+Lets the frontend discard downloaded content, optionally including the blacklist. A support path: clearing the blacklist re-enables installing a release that was previously found to be broken, so grant it deliberately.
+"""
+permissions = ["allow-reset"]

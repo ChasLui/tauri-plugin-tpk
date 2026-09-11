@@ -1,167 +1,193 @@
-import { invoke } from '@tauri-apps/api/core';
-import { listen, type Event, type UnlistenFn } from '@tauri-apps/api/event';
+/**
+ * TypeScript API for `tauri-plugin-tpk`.
+ *
+ * Updates take effect on the next cold start. There is deliberately no way to
+ * swap layers in a running process: the WebView would end up mixing modules
+ * from two different revisions.
+ *
+ * The update URL and the trusted keys are native configuration. Nothing here
+ * can change them — that is what keeps a scripting bug from repointing the
+ * updater.
+ */
 
-/** Download progress reported during `applyUpdate()` or `downloadUpdate()`. All sizes are in bytes. */
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+/** One of the frozen error codes from the specification. */
+export type ErrorCode =
+  | "E_DISABLED"
+  | "E_NETWORK"
+  | "E_SIGNATURE"
+  | "E_HASH"
+  | "E_SPEC"
+  | "E_PATH"
+  | "E_PARENT"
+  | "E_SHELL"
+  | "E_WATERMARK"
+  | "E_BLACKLIST"
+  | "E_IO"
+  | "E_DELTA"
+  | "E_STATE"
+  | "E_POLICY";
+
+/** The shape a rejected command throws. */
+export interface TpkError {
+  code: ErrorCode;
+  message: string;
+}
+
+/** A pack the channel is offering. */
+export interface PackSummary {
+  id: string;
+  kind: "base" | "patch" | "dlc" | "mod";
+  version: string;
+  version_code: number;
+  size: number;
+}
+
+/**
+ * What {@link check} found.
+ *
+ * Every one of these is a normal outcome, not an exception: "you are up to
+ * date" and "your app is too old for this content" are ordinary answers.
+ */
+export type CheckOutcome =
+  | { status: "up_to_date"; watermark: number }
+  | { status: "available"; packs: PackSummary[]; bytes: number; notes?: string }
+  | { status: "shell_required"; min_shell: string }
+  | { status: "disabled" }
+  | { status: "degraded"; consecutive_rollbacks: number };
+
+/** What {@link download} did. */
+export type DownloadOutcome =
+  | { status: "staged"; rev: string; bytes: number }
+  | { status: "up_to_date" }
+  | { status: "shell_required"; min_shell: string }
+  | { status: "disabled" }
+  | { status: "failed"; code: ErrorCode; message: string };
+
+/** What {@link notifyReady} did. */
+export type ReadyOutcome =
+  { status: "committed"; rev: string } | { status: "noop" };
+
+/** One loaded layer. */
+export interface LayerSummary {
+  id: string;
+  kind: "base" | "patch" | "dlc" | "mod";
+  version_code: number;
+}
+
+/** What {@link status} reports. */
+export interface Status {
+  /** `committed` once acknowledged, `booting` while a revision is on trial. */
+  pointer: "committed" | "booting";
+  rev?: string;
+  layers: LayerSummary[];
+  shell: string;
+  watermark: number;
+  /** Whether a revision is waiting for the next cold start. */
+  pending: boolean;
+  /** Automatic updating stops after repeated rollbacks. */
+  degraded: boolean;
+  /** Layers that failed to load this launch, by hash. */
+  failed_layers: string[];
+  /**
+   * Capabilities granted to this window that overlay JavaScript can reach.
+   * Empty is what you want: pack content runs on the `tauri://` origin and
+   * inherits whatever the window was granted.
+   */
+  unsafe_capabilities: string[];
+  /** Whether the binary carries a fallback for a rollback to land on. */
+  has_embedded_fallback: boolean;
+  last_error?: { code: ErrorCode; message: string };
+}
+
+/** Progress while downloading. */
 export interface DownloadProgress {
-	/** Number of bytes downloaded so far. */
-	downloaded: number;
-	/** Total bundle size in bytes, or null if the server did not provide Content-Length. */
-	total: number | null;
+  downloaded: number;
+  total: number;
+  pack_index: number;
+  pack_count: number;
+}
+
+/** A state machine transition. */
+export interface StateEvent {
+  pointer: "staged" | "committed" | "rolled_back" | "reset";
+  rev?: string;
+}
+
+/** Poll the channel for updates. */
+export async function check(): Promise<CheckOutcome> {
+  return await invoke("plugin:tpk|check");
 }
 
 /**
- * Lifecycle event emitted on the `hotswap://lifecycle` channel.
- * Common event names: check-start, check-complete, check-error,
- * download-start, download-complete, download-error, apply, rollback, ready-confirmed.
- */
-export interface LifecycleEvent {
-	event: string;
-	version?: string | null;
-	sequence?: number | null;
-	error?: string | null;
-}
-
-/** Result of a `checkUpdate()` call. */
-export interface HotswapCheckResult {
-	available: boolean;
-	version: string | null;
-	sequence: number | null;
-	notes: string | null;
-	/** Whether this update is mandatory (e.g. security patch). */
-	mandatory: boolean | null;
-	/** Bundle size in bytes, if provided by the server. */
-	bundle_size: number | null;
-}
-
-/** Information about the currently active (or a previously installed) bundle version. */
-export interface HotswapVersionInfo {
-	version: string | null;
-	sequence: number;
-	binary_version: string;
-	active: boolean;
-}
-
-/** Runtime configuration snapshot. */
-export interface RuntimeConfig {
-	/** Active update channel, or null for default. */
-	channel: string | null;
-	/** Runtime endpoint override, or null for init-time value. */
-	endpoint: string | null;
-	/** Custom HTTP headers sent on check and download requests. */
-	headers: Record<string, string>;
-}
-
-/** Options for updating runtime configuration. All fields are optional — only provided fields are applied. */
-export interface ConfigureOptions {
-	/** Set the update channel. Pass null to clear. */
-	channel?: string | null;
-	/** Override the endpoint URL. Pass null to revert to init-time value. */
-	endpoint?: string | null;
-	/** Merge headers: keys with null values are removed, others are set/overwritten. Existing headers not mentioned are kept. */
-	headers?: Record<string, string | null>;
-}
-
-/**
- * Check for an available update.
- */
-export async function checkUpdate(): Promise<HotswapCheckResult> {
-	return invoke<HotswapCheckResult>('plugin:hotswap|hotswap_check');
-}
-
-/**
- * Download, verify, extract, and activate the pending update in one step.
- * Call `checkUpdate()` first. Returns the new version string.
+ * Download and stage whatever {@link check} found.
  *
- * For more control, use `downloadUpdate()` + `activateUpdate()` instead.
+ * The result applies on the next cold start. Tell the user that rather than
+ * reloading the WebView — a reload would mix modules from two revisions.
+ */
+export async function download(): Promise<DownloadOutcome> {
+  return await invoke("plugin:tpk|download");
+}
+
+/**
+ * Acknowledge that the running revision works.
  *
- * The update is NOT confirmed automatically — call `notifyReady()` on
- * the next app launch. If not called, the next launch will auto-rollback.
- */
-export async function applyUpdate(): Promise<string> {
-	return invoke<string>('plugin:hotswap|hotswap_apply');
-}
-
-/**
- * Download and verify the pending update WITHOUT activating it.
- * Use this for "download now, apply later" workflows.
+ * Call it **after the first screen has actually rendered**, not at the top of
+ * your entry point. What this promises is that the content is usable, and the
+ * only thing that can tell is the content itself. Until it is called the
+ * revision is on trial, and enough unacknowledged launches roll it back.
  *
- * Call `activateUpdate()` when you're ready to swap.
+ * Calling it more than once is harmless.
  */
-export async function downloadUpdate(): Promise<string> {
-	return invoke<string>('plugin:hotswap|hotswap_download');
+export async function notifyReady(): Promise<ReadyOutcome> {
+  return await invoke("plugin:tpk|notify_ready");
+}
+
+/** Report what is loaded and what is pending. */
+export async function status(): Promise<Status> {
+  return await invoke("plugin:tpk|status");
 }
 
 /**
- * Activate a previously downloaded update.
- * The new assets will be served after a reload or next launch.
- */
-export async function activateUpdate(): Promise<string> {
-	return invoke<string>('plugin:hotswap|hotswap_activate');
-}
-
-/**
- * Roll back to the previous version or embedded assets.
- */
-export async function rollback(): Promise<HotswapVersionInfo> {
-	return invoke<HotswapVersionInfo>('plugin:hotswap|hotswap_rollback');
-}
-
-/**
- * Get current version info.
- */
-export async function getVersionInfo(): Promise<HotswapVersionInfo> {
-	return invoke<HotswapVersionInfo>('plugin:hotswap|hotswap_current_version');
-}
-
-/**
- * Confirm the current version works. Call this on every app startup.
- * If not called, the next launch auto-rollbacks to the previous version.
- */
-export async function notifyReady(): Promise<void> {
-	return invoke<void>('plugin:hotswap|hotswap_notify_ready');
-}
-
-/**
- * Update runtime configuration atomically.
- * Only provided fields are applied — omitted fields are left unchanged.
+ * Discard downloaded content.
  *
- * @example
- * ```typescript
- * await configure({ channel: 'beta', headers: { 'Authorization': 'Bearer token' } });
- * ```
+ * Requires the `tpk:allow-reset` capability. `clearBlacklist` also forgets
+ * which releases were found to be broken, so a support agent can retry one —
+ * which is exactly why it is not the default.
  */
-export async function configure(options: ConfigureOptions): Promise<void> {
-	return invoke<void>('plugin:hotswap|hotswap_configure', { ...options });
+export async function reset(options?: {
+  clearBlacklist?: boolean;
+}): Promise<Status> {
+  return await invoke("plugin:tpk|reset", {
+    options: { clear_blacklist: options?.clearBlacklist ?? false },
+  });
 }
 
-/**
- * Get the current runtime configuration snapshot.
- */
-export async function getConfig(): Promise<RuntimeConfig> {
-	return invoke<RuntimeConfig>('plugin:hotswap|hotswap_get_config');
-}
-
-/**
- * Listen for download progress events during `applyUpdate()` or `downloadUpdate()`.
- */
+/** Subscribe to download progress. */
 export async function onDownloadProgress(
-	handler: (progress: DownloadProgress) => void,
+  handler: (progress: DownloadProgress) => void,
 ): Promise<UnlistenFn> {
-	return listen<DownloadProgress>('hotswap://download-progress', (event: Event<DownloadProgress>) => {
-		handler(event.payload);
-	});
+  return await listen<DownloadProgress>("tpk://download-progress", (event) =>
+    handler(event.payload),
+  );
 }
 
-/**
- * Listen for lifecycle events (check-start, check-complete, download-start,
- * download-complete, download-error, apply, rollback, ready-confirmed).
- *
- * Use this to forward telemetry to your analytics backend.
- */
-export async function onLifecycle(
-	handler: (event: LifecycleEvent) => void,
+/** Subscribe to state machine transitions. */
+export async function onState(
+  handler: (event: StateEvent) => void,
 ): Promise<UnlistenFn> {
-	return listen<LifecycleEvent>('hotswap://lifecycle', (event: Event<LifecycleEvent>) => {
-		handler(event.payload);
-	});
+  return await listen<StateEvent>("tpk://state", (event) =>
+    handler(event.payload),
+  );
+}
+
+/** Subscribe to failures. Useful for telemetry. */
+export async function onError(
+  handler: (error: TpkError) => void,
+): Promise<UnlistenFn> {
+  return await listen<TpkError>("tpk://error", (event) =>
+    handler(event.payload),
+  );
 }
