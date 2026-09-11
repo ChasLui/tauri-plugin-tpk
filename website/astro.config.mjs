@@ -45,22 +45,37 @@ export default defineConfig({
         { label: 'Introduction', slug: 'index' },
         { label: 'Readme', slug: 'readme' },
         {
-          label: 'Guides',
+          label: 'Start here',
           items: [
+            { label: 'Philosophy', slug: 'philosophy' },
             { label: 'Configuration', slug: 'configuration' },
-            { label: 'Creating Bundles', slug: 'creating-bundles' },
+            { label: 'API Reference', slug: 'api-reference' },
+            { label: 'Packaging', slug: 'packaging' },
+          ],
+        },
+        {
+          label: 'How it works',
+          items: [
+            { label: 'Architecture', slug: 'architecture' },
+            { label: 'Overlay Resolution', slug: 'overlay' },
+            { label: 'Disk Layout', slug: 'disk-layout' },
             { label: 'Server Contract', slug: 'server-contract' },
+          ],
+        },
+        {
+          label: 'Shipping it',
+          items: [
+            { label: 'Security', slug: 'security' },
+            { label: 'App Review Checklist', slug: 'app-review-checklist' },
+            { label: 'The Updater Boundary', slug: 'updater-boundary' },
+            { label: 'Error Codes', slug: 'error-codes' },
             { label: 'Local Testing', slug: 'local-testing' },
           ],
         },
         {
-          label: 'Reference',
+          label: 'Migrating',
           items: [
-            { label: 'API Reference', slug: 'api-reference' },
-            { label: 'Architecture', slug: 'architecture' },
-            { label: 'Advanced Policies', slug: 'advanced-policies' },
-            { label: 'Security', slug: 'security' },
-            { label: 'Design Philosophy', slug: 'philosophy' },
+            { label: 'From tauri-plugin-hotswap', slug: 'migrating-from-hotswap' },
           ],
         },
       ],

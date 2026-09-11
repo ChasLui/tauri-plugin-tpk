@@ -1,200 +1,148 @@
 ---
 title: Configuration
+description: Every field of `plugins.tpk`, the permissions, and the platform defaults.
 ---
 
-# ⚙️ Configuration
+# Configuration
 
-There are three ways to configure the plugin, from simplest to most flexible.
-
----
-
-## Option A: `tauri.conf.json` (recommended)
+Configuration lives in `plugins.tpk` in `tauri.conf.json`. There is no runtime
+setter for any of it — see
+[The update source is not runtime state](./philosophy.md#the-update-source-is-not-runtime-state).
 
 ```json
 {
   "plugins": {
     "tpk": {
-      "endpoint": "https://example.com/api/updates/{{current_sequence}}",
-      "pubkey": "<YOUR_MINISIGN_PUBKEY>",
-      "channel": "production",
-      "headers": {
-        "Authorization": "Bearer <token>"
-      },
-      "max_bundle_size": 536870912,
-      "max_retries": 3,
-      "require_https": true,
-      "binary_cache_policy": "keep_compatible",
-      "confirmation_policy": "single_launch",
-      "rollback_policy": "latest_confirmed",
-      "max_retained_versions": 2
+      "manifest_url": "https://cdn.example.com/tpk/{{channel}}/latest.json",
+      "pubkeys": [{ "key": "RWT...", "epoch": 1 }]
     }
   }
 }
 ```
 
-```rust
-let context = tauri::generate_context!();
-let (plugin, context) = tauri_plugin_tpk::init(context)?;
+That is the whole required set. Everything else has a default.
+
+## Fields
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `manifest_url` | string | **required** | Channel manifest URL. https only |
+| `pubkeys` | array | **required** | Trusted signing keys |
+| `enabled` | bool | `true` | Turn the plugin off without removing it |
+| `channel` | string | `"stable"` | Channel to poll |
+| `auto_check_on_launch` | bool | desktop `true`, mobile `false` | Check during startup |
+| `auto_download` | bool | desktop `true`, mobile `false` | Download once an update is found |
+| `cache_budget_bytes` | number | desktop 32 MiB, mobile 8 MiB | In-memory decoded-asset budget. `0` disables the cache |
+| `headers` | object | `{}` | Headers sent with manifest and pack requests |
+| `seed_dir` | string | unset | Bundled seed pack, relative to the resource directory |
+
+The section uses `deny_unknown_fields`. A misspelled key fails loudly at startup
+rather than silently taking its default and leaving you convinced you configured
+something you did not.
+
+### `manifest_url`
+
+May contain `{{channel}}`, `{{arch}}`, `{{target}}` and `{{shell}}`, and nothing
+else. Any other variable is an error. The template is deliberately closed: an
+open-ended one would reintroduce the ability to point the updater somewhere
+else, which is the property the whole native-configuration design exists to
+protect.
+
+Non-https URLs are rejected.
+
+```json
+"manifest_url": "https://cdn.example.com/tpk/{{channel}}/{{target}}/latest.json"
 ```
 
-## Option B: Programmatic config
+### `pubkeys`
 
-```rust
-use tauri_plugin_tpk::TpkConfig;
-
-let (plugin, context) = tauri_plugin_tpk::init_with_config(
-    context,
-    TpkConfig::new("<YOUR_MINISIGN_PUBKEY>")
-        .endpoint("https://example.com/api/updates/{{current_sequence}}")
-        .channel("production")
-        .header("Authorization", "Bearer <token>"),
-)?;
+```json
+"pubkeys": [
+  { "key": "RWTnew...", "epoch": 2 },
+  { "key": "RWTold...", "epoch": 1 }
+]
 ```
 
-## Option C: Builder with custom resolver
+`epoch` defaults to `1`. The client keeps a monotonic floor: once it has seen a
+manifest signed with epoch 2 it will never again accept epoch 1. Keep both keys
+listed during a rotation window, then drop the old one in the next shell
+release. The SLA and its limits are in
+[Security](./security.md#key-rotation-and-its-real-sla).
 
-```rust
-use tauri_plugin_tpk::{TpkBuilder, StaticFileResolver};
+Generate a key pair with `tpk keygen`. The secret key never belongs in the
+repository — read it from the environment in CI.
 
-let (plugin, context) = TpkBuilder::new("<YOUR_MINISIGN_PUBKEY>")
-    .resolver(StaticFileResolver::new("https://cdn.example.com/latest.json"))
-    .channel("production")
-    .header("Authorization", "Bearer <token>")
-    .max_bundle_size(256 * 1024 * 1024)
-    .max_retries(5)
-    .require_https(true)
-    .binary_cache_policy(tauri_plugin_tpk::BinaryCachePolicyKind::KeepCompatible)
-    .confirmation_policy(tauri_plugin_tpk::ConfirmationPolicyKind::GracePeriod {
-        max_unconfirmed_launches: 3,
-    })
-    .rollback_policy(tauri_plugin_tpk::RollbackPolicyKind::LatestConfirmed)
-    .max_retained_versions(3)
-    .build(context)?;
-```
+### Mobile defaults
 
----
+`auto_check_on_launch` and `auto_download` are off on mobile for two reasons: a
+silent network fetch on every launch is a dormant behaviour from App Review's
+point of view, and a first launch that downloads before showing anything is a
+poor review experience. Turning them on is your call, and your submission.
 
-## 📋 Configuration Reference
+The cache budget is smaller on mobile because the same bytes are copied again
+crossing the WebView bridge.
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `endpoint` | `string` | **required** | Update check URL. `{{current_sequence}}` is replaced with the current sequence number at runtime. |
-| `pubkey` | `string` | **required** | Minisign public key (`RW...` base64 line from your `.pub` file). |
-| `channel` | `string` | — | Update channel (e.g. `"production"`, `"staging"`, `"beta"`). Sent as a `&channel=` query param. Can be changed at runtime via `configure()`. |
-| `headers` | `object` | — | Custom HTTP headers sent on **every** check and download request. Common use: `{"Authorization": "Bearer <token>"}`. |
-| `max_bundle_size` | `number` | `536870912` (512 MB) | Maximum download size in bytes. Downloads exceeding this are aborted immediately. Protects against memory exhaustion. |
-| `max_retries` | `number` | `3` | Number of download retry attempts. Uses exponential backoff: 1s, 2s, 4s, 8s, capped at 16s. |
-| `require_https` | `boolean` | `true` | Reject non-HTTPS URLs for both check and download requests. Set to `false` only for local development with `http://localhost`. |
-| `binary_cache_policy` | `string` | `discard_on_upgrade` | Controls cache retention on binary upgrades. `keep_compatible` keeps the cache if the binary still satisfies `min_binary_version`. `discard_on_upgrade` discards when the binary is newer (default). `never_discard` never discards from policy. |
-| `confirmation_policy` | `string\|object` | `single_launch` | Controls what happens on startup if `notifyReady()` wasn't called. `single_launch` rolls back immediately (default). `{ "grace_period": { "max_unconfirmed_launches": 3 } }` allows N unconfirmed launches before rollback. |
-| `rollback_policy` | `string` | `latest_confirmed` | Controls rollback target. `latest_confirmed` picks the highest confirmed version. `immediate_previous_confirmed` picks the version just before current. `embedded_only` always falls back to embedded assets. |
-| `max_retained_versions` | `number` | `2` | Total versions to keep on disk (min: 2). Includes current and rollback candidate. |
+### `headers`
 
----
+Applied to manifest and pack requests. Useful for a CDN token or a
+`Cache-Control` override. They are not a security boundary — treat them as
+routing metadata, not authentication for content you would not sign.
 
-## 🏷️ Channels
+### `seed_dir`
 
-Channels let you route different users to different update streams.
+A `.tpk` placed inside the app bundle, installed on first launch if nothing else
+is present. Useful when you want the shipped binary to carry a smaller embedded
+frontend and the real content to arrive as a pack. It is verified like any other
+pack; a bad seed logs and is ignored.
 
-### Configure at build time
+## Permissions
+
+Commands are gated by Tauri's ACL under the `tpk:` namespace.
+
+| Permission | Grants |
+|---|---|
+| `tpk:default` | `check`, `download`, `notify_ready`, `status` |
+| `tpk:allow-reset` | `reset` |
+| `tpk:allow-mods` | `set_mod_enabled` |
+| `tpk:deny-all` | nothing |
 
 ```json
 {
-  "plugins": {
-    "tpk": {
-      "channel": "production"
-    }
-  }
+  "identifier": "main",
+  "windows": ["main"],
+  "permissions": ["tpk:default"]
 }
 ```
 
-### Switch at runtime
+`reset` is not in the default set because `clearBlacklist` forgets which
+releases were found to be broken — a support-tooling capability, not something
+every window should have.
 
-```typescript
-import { configure, getConfig } from 'tauri-plugin-tpk-api';
+Files under `permissions/autogenerated/` are produced by `build.rs`; do not edit
+them.
 
-// Opt into beta updates
-await configure({ channel: 'beta' });
+## Capabilities you grant the window
 
-// Check what channel we're on
-const config = await getConfig();
-console.log(config.channel); // "beta"
+Pack content runs on `tauri://localhost` and inherits every capability the
+window has. If the window can `shell:allow-execute`, so can a pack. Read
+[Capability inheritance](./security.md#capability-inheritance) before you ship —
+this is the single most consequential configuration decision on this page, and
+it is not in `plugins.tpk`.
 
-// Reset to default (no channel param sent)
-await configure({ channel: null });
-```
-
-The channel is sent as a `&channel=beta` query parameter on check requests. Your server decides what to return for each channel.
-
----
-
-## 🔗 Runtime Endpoint Override
-
-You can switch the update endpoint at runtime without restarting the app:
-
-```typescript
-import { configure } from 'tauri-plugin-tpk-api';
-
-// Point to a different update server at runtime
-await configure({
-  endpoint: 'https://staging.example.com/api/updates/{{current_sequence}}',
-});
-
-// Reset to the endpoint from tauri.conf.json
-await configure({ endpoint: null });
-```
-
-The override takes effect on the next `checkUpdate()` call.
-
----
-
-## 🔑 Custom Headers
-
-Headers are sent on both check and download requests. Use them for:
-
-- **Auth tokens**: `{"Authorization": "Bearer <jwt>"}`
-- **API keys**: `{"X-API-Key": "sk_..."}`
-- **Device identification**: `{"X-Device-Id": "..."}`
-
-### From `tauri.conf.json`
-
-```json
-{
-  "plugins": {
-    "tpk": {
-      "headers": {
-        "Authorization": "Bearer eyJhbGciOi..."
-      }
-    }
-  }
-}
-```
-
-### From Rust
+## Programmatic configuration
 
 ```rust
-TpkConfig::new("pubkey...")
-    .endpoint("https://...")
-    .header("Authorization", "Bearer eyJhbGciOi...")
-    .header("X-API-Key", "sk_live_...")
+use tauri_plugin_tpk::{PubKey, TpkConfig};
+
+let config = TpkConfig::new(
+    "https://cdn.example.com/tpk/{{channel}}/latest.json",
+    vec![PubKey { key: "RWT...".into(), epoch: 1 }],
+)
+.channel("beta");
+
+tauri::Builder::default()
+    .plugin(tauri_plugin_tpk::init_with_config(tpk, config))
 ```
 
-### Update headers at runtime
-
-```typescript
-import { configure } from 'tauri-plugin-tpk-api';
-
-// Merge headers: set or overwrite a key (other existing headers are kept)
-await configure({
-  headers: { 'Authorization': 'Bearer <refreshed-token>' },
-});
-
-// Remove a specific header by passing null for its value
-await configure({
-  headers: { 'Authorization': null },
-});
-```
-
-`configure({ headers })` uses **merge semantics**: keys with a string value are added or overwritten, keys with a `null` value are removed, and any headers not mentioned in the call are left unchanged.
-
-> ⚠️ Headers are stored in memory only — they are not persisted to disk. Sensitive tokens should be loaded from secure storage at startup.
+`plugins.tpk` is then optional. Use this when the channel is chosen at build
+time by a feature flag; do not use it to read the URL from somewhere mutable.

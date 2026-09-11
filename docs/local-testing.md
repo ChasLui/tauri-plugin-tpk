@@ -1,217 +1,169 @@
 ---
-title: Testing OTA Updates Locally
+title: Local testing
+description: Serving a channel from your laptop and exercising the paths that matter.
 ---
 
-# Testing OTA Updates Locally
+# Local testing
 
-This guide walks you through setting up a local environment to test OTA updates end-to-end — from bundle creation to signature verification to asset serving.
+## A channel on localhost
 
----
+`manifest_url` must be https, so a plain `python3 -m http.server` will not do.
+Use a local TLS proxy, or point at a tunnel:
 
-## Prerequisites
+```bash
+# a throwaway cert with mkcert
+mkcert -install && mkcert localhost
+npx http-server ./cdn -S -C localhost.pem -K localhost-key.pem -p 8443
+```
 
-- [minisign](https://jedisct1.github.io/minisign/) for signing bundles
-- [Node.js](https://nodejs.org/) for the test server
-- Tauri CLI: `cargo install tauri-cli`
+```json
+"manifest_url": "https://localhost:8443/{{channel}}/latest.json"
+```
+
+Directory layout:
+
+```
+cdn/stable/
+├── latest.json
+├── latest.json.minisig
+└── core-2.1.0.tpk
+```
+
+## Build a pack and a channel
+
+```bash
+tpk keygen --out /tmp/tpk-secret.key      # prints the public key
+export TPK_SECRET_KEY=$(cat /tmp/tpk-secret.key)
+
+pnpm build
+
+tpk pack --kind base --id core \
+  --version 2.1.0 --version-code "$(date -u +%Y%m%d%H%M%S)" \
+  --created-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --dist dist/ --out cdn/stable/core-2.1.0.tpk
+
+tpk channel --channel stable --pack cdn/stable/core-2.1.0.tpk \
+  --url-base https://localhost:8443/stable/ \
+  --watermark auto --out cdn/stable/latest.json
+
+tpk verify --pubkey "$TPK_PUBKEY" \
+  --file cdn/stable/latest.json --file cdn/stable/core-2.1.0.tpk
+```
+
+Put the printed public key into `plugins.tpk.pubkeys`.
+
+## Exercise the flow
+
+```ts
+const c = await check();
+console.log(c);                    // { status: "available", ... }
+console.log(await download());     // { status: "staged", rev: "..." }
+console.log(await status());       // pending: true
+// quit and relaunch — updates apply on cold start
+console.log(await status());       // pointer: "booting"
+await notifyReady();
+console.log(await status());       // pointer: "committed"
+```
+
+## Test the rollback
+
+This is the path worth testing, and almost nobody does.
+
+```bash
+# a pack whose frontend never calls notifyReady()
+tpk pack --kind base --id core \
+  --version 9.9.9 --version-code "$(date -u +%Y%m%d%H%M%S)" \
+  --created-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --dist broken-dist/ --out cdn/stable/core-broken.tpk
+```
+
+Stage it, then cold start three times. On the third the revision is rolled back
+and blacklisted, `onState` fires with `rolled_back`, and the app is back on the
+previous content.
+
+Then confirm the blacklist holds: republish the same `version_code` and watch
+`check()` decline it. Bumping `version_code` is the only way past — deliberately,
+so a CI rerun cannot push a condemned release back onto devices.
+
+## Test a patch chain
+
+```bash
+tpk pack --kind patch --id core \
+  --version 2.1.1 --version-code "$(date -u +%Y%m%d%H%M%S)" \
+  --created-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --parent cdn/stable/core-2.1.0.tpk \
+  --dist dist/ --out cdn/stable/core-2.1.1.tpk
+
+tpk inspect cdn/stable/core-2.1.1.tpk --json \
+  | jq '[.entries[] | .op] | group_by(.) | map({op: .[0], n: length})'
+```
+
+You should see a mix of `full`, `delta` and `delete`. If everything is `full`,
+your build is not reproducible — a changed bundle hash on every file usually
+means a timestamp or a content hash in the output names.
+
+## Test the tombstone
+
+Delete a file from `dist/`, build a patch, install it, and request the deleted
+path. It must 404 — **not** fall through to the embedded asset. That fall-through
+is the classic overlay bug and it is the reason `ResolveMiss` distinguishes
+`Deleted` from `NotFound`.
+
+## Inspecting state
 
 ```bash
 # macOS
-brew install minisign
-
-# Other platforms: see https://jedisct1.github.io/minisign/
+python3 -m json.tool ~/Library/Application\ Support/com.example.app/tpk/state.json
 ```
 
----
+Paths for every platform are in [Disk layout](./disk-layout.md).
 
-## 1. Generate a signing keypair
+Start over:
+
+```ts
+await reset({ clearBlacklist: true });
+```
+
+or delete the `tpk` directory in both roots.
+
+## Mobile
+
+**`cargo tauri ios dev` and `android dev` prove nothing.** They proxy every asset
+request to the dev server, so `Assets::get()` is never called and no part of the
+overlay runs.
 
 ```bash
-minisign -G -W -p minisign.pub -s minisign.key
-```
-
-The `-W` flag skips the password prompt (fine for local testing). Keep the public key — you'll need it for your Tauri config.
-
-The output will show your public key:
-
-```
-Files signed using this key pair can be verified with the following command:
-
-minisign -Vm <file> -P RWR+iJ9ehTe/IxJtbA0haSUz...
-```
-
----
-
-## 2. Create and sign a test bundle
-
-Create a directory with your updated frontend assets:
-
-```
-bundle-v1/
-├── index.html
-├── style.css      # optional — multi-file bundles work
-└── app.js         # optional
-```
-
-Then package and sign:
-
-```bash
-cd bundle-v1
-tar czf ../bundle-v1.tar.gz .
-minisign -Sm ../bundle-v1.tar.gz -s ../minisign.key
-```
-
-This produces `bundle-v1.tar.gz` and `bundle-v1.tar.gz.minisig`.
-
----
-
-## 3. Run a local test server
-
-Create a minimal Node.js server that implements the [server contract](server-contract.md):
-
-```javascript
-// server.mjs
-import { createServer } from "node:http";
-import { readFile, stat } from "node:fs/promises";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PORT = 3333;
-
-const signature = (await readFile(join(__dirname, "bundle-v1.tar.gz.minisig"), "utf-8")).trim();
-const bundlePath = join(__dirname, "bundle-v1.tar.gz");
-const bundleSize = (await stat(bundlePath)).size;
-
-const server = createServer(async (req, res) => {
-  const url = new URL(req.url, `http://localhost:${PORT}`);
-  console.log(`${req.method} ${url.pathname}${url.search}`);
-
-  // Check endpoint: GET /api/ota/:currentSequence
-  const checkMatch = url.pathname.match(/^\/api\/ota\/(\d+)$/);
-  if (checkMatch) {
-    const currentSeq = parseInt(checkMatch[1], 10);
-
-    if (currentSeq >= 1) {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
-
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({
-      version: "0.1.0-ota.1",
-      sequence: 1,
-      min_binary_version: "0.1.0",
-      url: `http://localhost:${PORT}/bundles/bundle-v1.tar.gz`,
-      signature,
-      notes: "Test OTA update",
-      pub_date: new Date().toISOString(),
-      bundle_size: bundleSize,
-    }));
-    return;
-  }
-
-  // Bundle download
-  const bundleMatch = url.pathname.match(/^\/bundles\/(.+)$/);
-  if (bundleMatch) {
-    try {
-      const data = await readFile(join(__dirname, bundleMatch[1]));
-      res.writeHead(200, {
-        "Content-Type": "application/gzip",
-        "Content-Length": data.length,
-      });
-      res.end(data);
-    } catch {
-      res.writeHead(404);
-      res.end("Not found");
-    }
-    return;
-  }
-
-  res.writeHead(404);
-  res.end("Not found");
-});
-
-server.listen(PORT, () => console.log(`Test server on http://localhost:${PORT}`));
-```
-
-Run it:
-
-```bash
-node server.mjs
-```
-
----
-
-## 4. Configure your app
-
-In `tauri.conf.json`:
-
-```json
-{
-  "plugins": {
-    "tpk": {
-      "endpoint": "http://localhost:3333/api/ota/{{current_sequence}}",
-      "pubkey": "YOUR_PUBLIC_KEY_FROM_STEP_1",
-      "require_https": false
-    }
-  }
-}
-```
-
-> `require_https: false` is required for `http://localhost`. Never disable this in production.
-
----
-
-## 5. Build and run
-
-> **Important:** `cargo tauri ios dev` and `cargo tauri android dev` proxy all asset requests to the dev server and bypass the `Assets` trait entirely. OTA asset serving is **not tested** in dev mode on mobile. Always use production builds for testing.
-
-### Desktop (macOS, Windows, Linux)
-
-```bash
-cargo tauri build --debug
-# Then run the binary from target/debug/
-```
-
-### iOS
-
-```bash
-# Requires Xcode with a signing identity
 cargo tauri ios build --debug
-```
-
-Install on simulator:
-
-```bash
-xcrun simctl install booted path/to/hotswap-example.app
-xcrun simctl launch booted com.example.hotswap
-```
-
-### Android
-
-```bash
 cargo tauri android build --debug
 ```
 
-Install on emulator:
-
 ```bash
-# Forward the test server port to the emulator
-adb reverse tcp:3333 tcp:3333
+# Android logs
+adb logcat | grep -i tpk
+# Android state
+adb shell run-as com.example.app ls -la files/tpk/
 
-# Install and launch
-adb install -r path/to/app-universal-debug.apk
-adb shell am start -n com.example.hotswap/.MainActivity
+# iOS simulator container
+xcrun simctl get_app_container booted com.example.app data
 ```
 
----
+Remember that `auto_check_on_launch` and `auto_download` default to `false` on
+mobile — call `check()` and `download()` explicitly, or you will conclude the
+plugin is broken.
 
-## 6. Verify the flow
+## In CI
 
-1. **App starts** with embedded assets (the version bundled in the binary)
-2. **Check for Update** — the app hits your local server and finds seq 1
-3. **Apply Update** — downloads the bundle, verifies the minisign signature, extracts to disk
-4. **Reload** — the app now serves the OTA assets from the filesystem
-5. **Rollback** — returns to the previous version (or embedded assets)
-6. **Restart the app** — OTA assets persist across restarts; if `notifyReady()` wasn't called, auto-rollback kicks in
+```bash
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo fmt --all --check
+cargo deny check licenses bans
+cargo check --manifest-path examples/shell-app/src-tauri/Cargo.toml
+```
+
+`examples/shell-app/src-tauri` is excluded from the workspace and carries its own
+lockfile, so `--workspace` never covers it. Check it separately.
+
+`cargo deny`'s `bans.wrappers` pins the zstd boundary: `ruzstd` (pure Rust)
+decodes at runtime, the C `zstd` encoder is CLI-only. If a change makes the
+runtime pull `zstd-sys`, that check fails — and it is meant to.

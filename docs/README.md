@@ -1,37 +1,37 @@
----
-title: tauri-plugin-tpk
----
+# Documentation
 
-# 🔥🔄 tauri-plugin-tpk
-
-✨ Ship frontend fixes in minutes
-
-`tauri-plugin-tpk` is a fully open-source OTA plugin for Tauri v2 that lets you update frontend assets without rebuilding your native binary. Bring your own server, bring your own signing keys, and keep full control of your release process. 🚀
-
-## Why teams use hotswap
-
-- **⚡ Fast iteration**: push frontend patches without shipping a new native build
-- **🔐 Security first**: signed bundles, HTTPS by default, and strict validation
-- **🛟 Safe rollouts**: automatic rollback if an update is not confirmed healthy
-- **🧩 No vendor lock-in**: self-host on your own infrastructure
-
-## What this book gives you
-
-- **[Design Philosophy](philosophy.md)** — Principles and tradeoffs behind the plugin
-- **[Configuration](configuration.md)** — Initialization patterns and all runtime options
-- **[API Reference](api-reference.md)** — Complete JavaScript and Rust API surface
-- **[Server Contract](server-contract.md)** — Exact check endpoint and manifest requirements
-- **[Creating Bundles](creating-bundles.md)** — Build, sign, and publish update bundles
-- **[Architecture](architecture.md)** — Internal flow and lifecycle behavior
-- **[Security](security.md)** — Threat model, mitigations, and key-management guidance
+OTA frontend updates for Tauri v2. Content ships as signed `.tpk` packs that
+stack as layers over the binary's embedded assets.
 
 ## Start here
 
-If you are new to the project:
+- [Philosophy](./philosophy.md) — why this exists, and when not to use it
+- [Configuration](./configuration.md) — every field of `plugins.tpk`
+- [API reference](./api-reference.md) — the TypeScript and Rust surfaces
+- [Packaging](./packaging.md) — building, signing and publishing with the CLI
 
-1. Read **Configuration**
-2. Implement your endpoint via **Server Contract**
-3. Follow **Creating Bundles**
-4. Wire your frontend with **API Reference**
+## How it works
 
-For quick install snippets and repository context, see the [GitHub README](https://github.com/ChasLui/tauri-plugin-tpk).
+- [Architecture](./architecture.md) — the crates, startup, the state machine
+- [Overlay resolution](./overlay.md) — how layers stack and what wins
+- [Disk layout](./disk-layout.md) — what lives where, and what the OS may delete
+- [Server contract](./server-contract.md) — the channel manifest
+
+## Shipping it
+
+- [Security](./security.md) — threat model and store boundaries
+- [App review checklist](./app-review-checklist.md) — what to disclose and test
+- [The updater boundary](./updater-boundary.md) — pack or binary
+- [Error codes](./error-codes.md) — the fourteen frozen codes
+- [Local testing](./local-testing.md) — serving a channel from your laptop
+
+## Migrating
+
+- [From tauri-plugin-hotswap](./migrating-from-hotswap.md)
+
+## Specification
+
+The frozen format contract is `spec/tpk-v1.md`. **Appendix A of that file
+overrides the body** — it records where the original specification conflicts
+with Tauri's real API, with App Store and Play policy, and with measured
+performance.

@@ -1,15 +1,15 @@
 ---
-title: tauri-plugin-hotswap
+title: tauri-plugin-tpk
 template: splash
 hero:
-  tagline: Open-source OTA updates for Tauri v2. Push frontend fixes to your users in minutes — no app store, no rebuild. Works on macOS, Windows, Linux, Android, and iOS.
+  tagline: OTA frontend updates for Tauri v2. Signed content packs stack as layers over the binary's embedded assets, and a bad release rolls itself back.
   actions:
     - text: Get Started
-      link: /readme/
+      link: /tauri-plugin-tpk/readme/
       icon: right-arrow
       variant: primary
     - text: GitHub
-      link: https://github.com/denniskribl/tauri-plugin-hotswap
+      link: https://github.com/ChasLui/tauri-plugin-tpk
       icon: external
       variant: minimal
 ---
@@ -17,17 +17,17 @@ hero:
 import { Card, CardGrid, Steps } from '@astrojs/starlight/components';
 
 <CardGrid>
-  <Card title="Signed bundles" icon="approve-check-circle">
-    Every update is verified with minisign before extraction. No unsigned code ever reaches your users.
+  <Card title="Nothing executable is written" icon="approve-check-circle">
+    Packs are parsed out of a ZIP into memory and served through Tauri's `Assets` trait. No file the OS could execute, no dynamic library, no `$RESOURCE`.
   </Card>
-  <Card title="Auto-rollback" icon="warning">
-    If an update isn't confirmed healthy, the next launch automatically reverts to the last known-good version.
+  <Card title="A bad release can't brick the app" icon="warning">
+    A revision is on trial until the frontend acknowledges it. Three unacknowledged launches and it is rolled back and blacklisted.
   </Card>
-  <Card title="Self-hosted" icon="puzzle">
-    Bring your own CDN, S3, or any HTTPS endpoint. No vendor lock-in, no third-party dependencies.
+  <Card title="Layers, not replacements" icon="puzzle">
+    `base` / `patch` / `dlc` stack over the embedded assets. bsdiff deltas and deletion tombstones mean a hotfix is kilobytes, not megabytes.
   </Card>
-  <Card title="Zero downtime" icon="rocket">
-    Download in the background, activate when ready. Split download and apply for seamless UX.
+  <Card title="Static files, no service" icon="rocket">
+    A signed channel manifest and some `.tpk` files on any CDN. No API, no session, no vendor.
   </Card>
 </CardGrid>
 
@@ -36,9 +36,25 @@ import { Card, CardGrid, Steps } from '@astrojs/starlight/components';
 ## Quick start
 
 <Steps>
-1. **Configure** the plugin in your Tauri app → [Configuration](/configuration/)
-2. **Set up** your update endpoint → [Server Contract](/server-contract/)
-3. **Build & sign** your first bundle → [Creating Bundles](/creating-bundles/)
-4. **Wire** the frontend API → [API Reference](/api-reference/)
-5. **Test** locally before deploying → [Local Testing](/local-testing/)
+1. **Configure** the plugin → [Configuration](/tauri-plugin-tpk/configuration/)
+2. **Publish** a channel → [Server Contract](/tauri-plugin-tpk/server-contract/)
+3. **Build & sign** a pack → [Packaging](/tauri-plugin-tpk/packaging/)
+4. **Wire** the frontend API → [API Reference](/tauri-plugin-tpk/api-reference/)
+5. **Test** it, including the rollback → [Local Testing](/tauri-plugin-tpk/local-testing/)
 </Steps>
+
+---
+
+## Before you ship to a store
+
+This is not a way around app review. Anything that changes what the app *does*
+belongs in a store release.
+
+Read [Security](/tauri-plugin-tpk/security/) for where the line is and who drew
+it, and work through the
+[App Review Checklist](/tauri-plugin-tpk/app-review-checklist/) before you
+submit.
+
+Upgrading from the previous plugin? See
+[Migrating](/tauri-plugin-tpk/migrating-from-hotswap/) — it is a rewrite, not a
+drop-in swap.

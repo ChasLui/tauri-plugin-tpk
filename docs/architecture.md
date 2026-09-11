@@ -1,194 +1,157 @@
 ---
 title: Architecture
+description: The crates, the startup sequence, and the state machine.
 ---
 
-# 🏗️ Architecture
+# Architecture
 
-This document explains how `tauri-plugin-tpk` works internally.
-
----
-
-## Overview
-
-```mermaid
-flowchart TD
-    A["Plugin Init
-    (before tauri::Builder::build)"] --> B
-    B["check_compatibility()
-    • Read current pointer
-    • Validate pointer format
-    • Read hotswap-meta.json
-    • Check binary compat (semver)
-    • Check confirmed flag
-    • Auto-rollback if needed"] --> C
-    C["Swap Context Assets
-    context.assets = PackAssets
-    (embedded → filesystem-first)"] --> D
-    D["App runs normally
-    WebView loads from tauri://localhost"]
-```
-
----
-
-## Filesystem Layout
+## Crates
 
 ```
-{app_data_dir}/hotswap/
-├── current                  # Text file containing "seq-42"
-├── current.tmp              # Temp file for atomic pointer writes
-├── seq-41/                  # Previous version (kept for rollback)
-│   ├── index.html
-│   ├── assets/
-│   └── hotswap-meta.json
-├── seq-42/                  # Current active version
-│   ├── index.html
-│   ├── assets/
-│   └── hotswap-meta.json
-└── .tmp-seq-43/             # In-progress extraction (cleaned up)
+tpk-format   TPK/1 container, manifest, paths, signatures — the single source of truth
+tpk-delta    bsdiff apply (runtime) / diff (CLI)
+tpk-resolve  layered overlay, tombstones, index, LRU, CSP hashes
+tpk-store    layer pool, three-state machine, blacklist, delta materialization
+tpk-client   channel manifest fetch, update planning, resumable download
+tpk-cli      the `tpk` binary
+tauri-plugin-tpk  attach/init, PackAssets, commands, events, permissions
 ```
 
-### `current` pointer
+Dependencies run one way and must stay that way:
 
-A plain text file containing the name of the active version directory (e.g. `seq-42`). Written atomically via temp file + rename.
+```
+tpk-format ◄── tpk-resolve ◄── tpk-store ──► tpk-delta
+tpk-format ◄── tpk-client              # client must NOT depend on store
+all of the above ◄── tauri-plugin-tpk
+```
 
-### `hotswap-meta.json`
+`tpk-client` deliberately does not depend on `tpk-store`. That keeps
+`Client::plan` a pure function — given a channel manifest, the installed layers
+and the shell version, it returns what to do — so the whole planning policy
+(monotonicity, patch parent exactness, rollout bucketing, shell gating) is
+testable without touching disk.
 
-```json
-{
-  "version": "0.1.0-ota.3",
-  "sequence": 42,
-  "min_binary_version": "0.1.0",
-  "confirmed": true
+## Startup
+
+Two entry points, and the split between them is the most important thing on this
+page.
+
+```rust
+fn main() {
+    let mut context = tauri::generate_context!();
+    let tpk = tauri_plugin_tpk::attach(&mut context);   // 1
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_tpk::init(tpk))            // 2
+        .run(context)
+        .expect("error running app");
 }
 ```
 
-The `confirmed` field is the rollback heartbeat. Set to `false` on extraction, `true` when `notifyReady()` is called.
+**1. `attach(&mut context)`** swaps `context.assets` for a `PackAssets` that
+keeps the embedded assets as its fallback, and returns a handle. It resolves no
+path, opens no file and reads no configuration. It cannot: on Android
+`app_local_data_dir()` goes through JNI and is not reachable this early.
 
----
+**2. `init(handle)`** registers the plugin. Everything stateful happens in its
+`setup` hook, which Tauri runs at the end of `Builder::build()` —
+`initialize_plugins` is called before the first window is created, so the
+resolver is in place before anything can request an asset.
 
-## Asset Resolution
+Inside `setup`, in order:
 
-When the WebView requests an asset (e.g. `/index.html`):
+1. Read `plugins.tpk`. Absent or unusable → log and stay inert.
+2. Build the `TrustStore` from `pubkeys`.
+3. Resolve the two disk roots and ask the platform to exclude the layer pool
+   from backup.
+4. `Store::open` — read `state.json` and the blacklist.
+5. Seed from the bundled pack if configured and nothing is installed yet.
+6. `Store::boot()` — run the state machine (below).
+7. Build the resolver over the resulting layer set and install it into
+   `PackAssets`.
+8. Record any layer that failed to load, and `manage` the plugin state.
 
-```mermaid
-flowchart TD
-    A["PackAssets::get('/index.html')"] --> B{"Validate key
-    (no .., no absolute paths)"}
-    B -->|valid| C{"Try: {ota_dir}/index.html"}
-    B -->|invalid| G["Reject request"]
-    C -->|found| H["Serve from filesystem"]
-    C -->|not found| D{"Try: {ota_dir}/index.html.html"}
-    D -->|found| H
-    D -->|not found| E{"Try: {ota_dir}/index.html/index.html"}
-    E -->|found| H
-    E -->|not found| F["Fallback: EmbeddedAssets::get('/index.html')"]
+`setup` **never returns `Err`**. Returning `Err` there aborts `Builder::build`
+and the app does not start — so a corrupt `state.json` or a full disk logs and
+degrades to the embedded assets instead of turning a content problem into a
+launch failure.
+
+## The three-state machine
+
+`state.json` holds three optional revision slots and a pointer:
+
+```
+       download()                cold start              notifyReady()
+  ─────────────────► staged ──────────────────► booting ──────────────► committed
+                                                   │
+                                        3 unacknowledged launches
+                                                   ▼
+                                        rolled back + blacklisted
 ```
 
-This means OTA bundles can be **partial** — any missing files fall through to the embedded assets.
+- **`staged`** — downloaded, verified, not yet tried.
+- **`booting`** — on trial this launch. `boot_attempts` counts launches without
+  an acknowledgement.
+- **`committed`** — acknowledged. What a rollback falls back to.
 
----
+`MAX_BOOT_ATTEMPTS` is 3. Below the threshold the revision is retried, because
+an OS kill or the user quitting are ordinary events. At the threshold the
+revision is rolled back, the release is blacklisted by both hash and
+`(id, version_code)`, and `consecutive_rollbacks` increments.
 
-## Update Flow
+`MAX_CONSECUTIVE_ROLLBACKS` is also 3. At that point the install is **degraded**:
+automatic checking and downloading stop, `check()` returns
+`{ status: "degraded" }`, and the app keeps serving whatever last worked. Three
+different releases failing in a row is more likely a problem with the device or
+the shell than with any one pack, and continuing to download would just burn
+bandwidth.
 
-### Check → Apply (one-shot)
+Two independent counters, not one: `boot_attempts` decides whether *this*
+revision is bad, `consecutive_rollbacks` decides whether *updating* is working
+at all.
 
-```mermaid
-sequenceDiagram
-    participant F as Frontend
-    participant P as Plugin
-    participant S as Server
+## Serving an asset
 
-    F->>P: checkUpdate()
-    P->>S: GET /updates/42
-    S-->>P: 200 { manifest }
-    P-->>F: { available: true }
-
-    F->>P: applyUpdate()
-    P->>S: GET bundle.tar.gz
-    S-->>P: streaming response
-    loop Progress
-        P-->>F: progress events
-    end
-    Note over P: Verify signature<br/>Extract to .tmp-seq-43<br/>Rename to seq-43<br/>Update current pointer
-    P-->>F: "0.1.0-ota.4"
-
-    F->>F: window.location.reload()
-    Note over F,P: WebView now serves assets from seq-43
+```
+WebView requests tauri://localhost/assets/app.js
+  └─ PackAssets::get(AssetKey)
+       ├─ normalize the key            (the WebView's, so normalized not rejected)
+       ├─ resolver index lookup        (winning layer for this path, precomputed)
+       │    ├─ hit  → read blob, verify blob_sha256, decode, verify sha256
+       │    ├─ Deleted    → 404, does NOT fall through to embedded
+       │    ├─ NotFound   → fall through to embedded
+       │    └─ LayerCorrupt → record failure, fall through to embedded
+       └─ LRU insert, return bytes
 ```
 
-### Check → Download → Activate (split)
+The index is built once during `setup` and holds only the *winning* layer per
+path, so serving is one map lookup rather than a walk down the stack. A
+tombstone that resolved to `Deleted` must not fall through: the whole point of
+`op: "delete"` is to hide a file the binary still embeds.
 
-```mermaid
-sequenceDiagram
-    participant F as Frontend
-    participant P as Plugin
+`PackAssets` uses `OnceLock`, not `RwLock`. Layers are frozen for the process
+lifetime by design, so a running WebView always sees a consistent index; making
+it swappable would be the hot-reload footgun described in
+[Philosophy](./philosophy.md).
 
-    F->>P: checkUpdate()
-    P-->>F: { available: true }
+## Where deltas are applied
 
-    F->>P: downloadUpdate()
-    Note over P: Download + verify + extract<br/>(pointer not updated yet)
-    P-->>F: "0.1.0-ota.4"
+In `stage()`, never in `boot()`.
 
-    Note over F: User keeps working...
+Applying a bsdiff patch at boot means reading the base, allocating the output
+and hashing it before the window can be created. On mobile that can trip the iOS
+20-second launch watchdog or an Android ANR — which kills the process, which
+increments `boot_attempts`, which after three launches blacklists a pack that
+was never broken. Materialization at download time costs nothing anyone is
+waiting on.
 
-    F->>P: activateUpdate()
-    Note over P: Update current pointer<br/>Cleanup old versions
-    P-->>F: "0.1.0-ota.4"
+The results land in the cache root, which the OS may purge at any time, so the
+lazy re-materialization path in `tpk-store::materialize` must always exist. See
+[Disk layout](./disk-layout.md).
 
-    F->>F: window.location.reload()
-```
+## Further reading
 
----
-
-## Rollback Mechanism
-
-### Automatic rollback (startup)
-
-1. App starts → `check_compatibility()` runs
-2. Reads `current` pointer → finds `seq-43`
-3. Reads `hotswap-meta.json` → `confirmed: false`
-4. **Rollback triggered**: deletes `seq-43`, finds `seq-42`
-5. If `seq-42` is confirmed → activate it
-6. If no confirmed version exists → fall back to embedded assets
-
-### Manual rollback (JS API)
-
-1. `rollback()` called
-2. Reads current pointer → `seq-43`
-3. Deletes `seq-43`
-4. Finds highest remaining confirmed version → `seq-42`
-5. Atomically updates pointer → `seq-42`
-
----
-
-## Retry Strategy
-
-Failed downloads use exponential backoff:
-
-| Attempt | Delay | Total elapsed |
-|---------|-------|---------------|
-| 1st | 0s | 0s |
-| 2nd | 1s | 1s |
-| 3rd | 2s | 3s |
-| 4th | 4s | 7s |
-
-Configurable via `max_retries` (default 3, meaning 4 total attempts including the first).
-
----
-
-## Version Retention
-
-The plugin keeps **2 versions**: current + previous. All older versions are cleaned up after each apply. Leftover `.tmp-seq-*` directories from failed extractions are also cleaned.
-
----
-
-## Runtime Configuration
-
-Calling `configure()` from the JS API updates `Mutex`-guarded fields inside `HotswapState`. The fields available for runtime override are:
-
-- `channel` — the update channel appended to check requests
-- `endpoint` — the check URL (overrides the value from `tauri.conf.json`)
-- `headers` — the full set of custom HTTP headers sent on check and download requests
-
-Changes take effect on the next `checkUpdate()` call. No app restart is required. The state is held in memory only and is not persisted across app launches — if you need a channel or endpoint override to survive restarts, persist it yourself and call `configure()` again on startup.
+- [Overlay resolution](./overlay.md)
+- [Disk layout](./disk-layout.md)
+- [Server contract](./server-contract.md)
+- [API reference](./api-reference.md)

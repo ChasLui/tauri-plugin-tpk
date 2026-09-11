@@ -1,99 +1,104 @@
 ---
-title: Design Philosophy
+title: Philosophy
+description: Why this plugin exists, what it deliberately refuses to do, and when you should not use it.
 ---
 
-# 🧭 Design Philosophy
+# Philosophy
 
-**Opinionated defaults. Extensible when you need it.**
+## The problem
 
-This plugin ships with strong defaults so you can go from zero to OTA updates in minutes. But every layer is swappable — you're never locked into a pattern that doesn't fit your architecture.
+A Tauri app ships its frontend inside the binary. Changing a button's label
+means a new binary: rebuild, re-sign, re-notarize, re-submit, wait for review,
+wait for users to update. For a native API change that cost is unavoidable. For
+a typo it is absurd.
 
----
+TPK lets the frontend ship on its own schedule while the shell — the Rust
+binary, its commands, its capabilities — keeps shipping through the store.
 
-## What's opinionated
+## What it is not
 
-These choices are baked in because they're the right default for most apps:
+**Not a way around app review.** Anything that changes what the app *does*
+belongs in a store release. This plugin is for the parts that were always just
+data: markup, styles, scripts, images, copy. See
+[Security](./security.md#store-compliance-boundaries) for where the line is and
+who drew it.
 
-| Default | Why |
-|---------|-----|
-| **Minisign signatures** | Every bundle is verified before extraction. No opt-out — unsigned updates are a security risk. |
-| **HTTPS enforced** | Non-HTTPS endpoints are rejected. Disable explicitly if you need local development. |
-| **Auto-rollback** | If `notifyReady()` isn't called after an update, the next launch rolls back. Crash loops are caught automatically. |
-| **Atomic operations** | Extraction goes to a temp directory, then renames. Pointer updates use temp file + rename. No half-written state. |
-| **Sequence-based ordering** | Monotonic integers, not semver comparison. Simple, unambiguous, works across any versioning scheme. |
-| **Filesystem-based caching** | Updates live on disk as extracted files. No database, no custom binary format, easy to inspect and debug. |
+**Not a native updater.** The shell is updated by `tauri-plugin-updater`, the
+app store, or your packaging system. TPK never replaces a binary. The two are
+complementary and the boundary is explicit — see
+[The updater boundary](./updater-boundary.md).
 
-## The server contract is opinionated (but optional)
+**Not a hot reload.** There is no way to swap layers in a running process, on
+purpose. A WebView that has already imported half a bundle would end up mixing
+modules from two revisions, and the failure mode is a blank screen with a stack
+trace nobody can reproduce. Updates apply on the next cold start.
 
-The built-in `HttpResolver` expects a specific shape from your endpoint:
+## Design commitments
 
-| Opinion | What it means |
-|---------|---------------|
-| **URL template** | `{{current_sequence}}` is replaced client-side — your server receives the current sequence in the URL path, not as a body field |
-| **Query params sent automatically** | `binary_version`, `platform`, `arch`, `channel` — you don't choose what's sent, but your server can ignore what it doesn't need |
-| **204 = no update** | Not a JSON response with `{ available: false }` — just an empty 204. Keeps the happy path simple. |
-| **200 = JSON manifest** | A flat object with `version`, `sequence`, `url`, `signature`, `min_binary_version`. No envelope, no pagination. |
-| **Sequences, not semver** | Update ordering uses monotonic integers. Semver is for display only — the plugin never parses or compares version strings. |
+### Nothing executable is written to disk
 
-These opinions exist because they work for 90% of apps. A simple endpoint with a database query and a CDN-hosted bundle is all you need.
+Pack contents are parsed out of a ZIP into memory and handed to the WebView
+through Tauri's `Assets` trait. No file the OS could execute is written, no
+dynamic library is loaded, `$RESOURCE` is never touched. This is what makes the
+mechanism defensible under Apple's DPLA §3.3.1(B) and Google Play's interpreter
+exemption — and it is an architectural property, not a policy we promise to
+follow.
 
-**But if they don't fit** — you're not stuck. Implement `TpkResolver` and the entire server contract disappears. The plugin only cares about getting a `TpkManifest` back. How you get there is up to you.
+### A bad release cannot brick the app
 
----
+A downloaded revision is `staged`. On the next cold start it becomes `booting` —
+on trial. Only when the frontend calls `notifyReady()` does it become
+`committed`. Three unacknowledged launches and it is rolled back and
+blacklisted. The three-launch threshold exists because an OS kill, a power loss
+and the user quitting are ordinary events; treating the first of them as "bad
+pack" condemns perfectly good releases.
 
-## What's extensible
+### Business outcomes are not errors
 
-Every extension point exists because real apps needed it:
+"You are up to date", "your shell is too old for this content", "this release
+was blacklisted", "updating is disabled" are answers, not exceptions.
+`check()` and `download()` return them as `status` values. `Err` is reserved for
+things the caller cannot act on. Frontends that have to `try/catch` to learn
+they are current end up swallowing real failures alongside.
 
-### Bring your own update source
+### The update source is not runtime state
 
-The `TpkResolver` trait decouples update checking from the transport layer. The built-in `HttpResolver` calls a URL. But you can implement the trait to check anywhere — a local file, a database, a custom protocol:
+`manifest_url` and `pubkeys` live in `tauri.conf.json` and have no setter and no
+command. A scripting bug in your frontend cannot repoint the updater at an
+attacker's CDN. This costs some flexibility and buys the property that the
+signed content chain has exactly one root, fixed at build time.
 
-```rust
-use tauri_plugin_tpk::{TpkResolver, CheckContext, TpkManifest};
+### Every rule lives in one place
 
-struct MyResolver { /* ... */ }
+Path validation, manifest cross-field rules, signature verification and the
+container layout are all in `tpk-format`, and everything else — the CLI, the
+store, the plugin — goes through it. The CLI that builds a pack and the client
+that consumes it run the same code, so a pack that packs is a pack that loads.
 
-impl TpkResolver for MyResolver {
-    fn check(&self, ctx: &CheckContext)
-        -> Pin<Box<dyn Future<Output = Result<Option<TpkManifest>>> + Send>>
-    {
-        // Check a local SQLite DB, a gRPC service, a message queue — anything.
-    }
-}
-```
+### Determinism is a feature
 
-### Runtime configuration
+`tpk pack` requires `--created-at` rather than defaulting to `now()`. Packing
+the same input twice produces the same bytes, which is what makes the
+blacklist's `(id, version_code)` matching and the channel manifest's SHA-256
+mean anything. A CI rerun that produces a different hash for identical input
+would let a condemned release slip back in.
 
-Channel, endpoint, and headers are all changeable at runtime via `configure()`. No rebuild, no restart:
+## When not to use this
 
-```typescript
-// Switch a beta tester to the internal channel
-await configure({
-  channel: 'internal',
-  headers: { 'Authorization': 'Bearer user-token' }
-});
+- **Your update is a native change.** New command, new capability, new
+  permission, newer platform API — ship a binary.
+- **You need instant rollout.** Updates apply on the next cold start. A
+  long-lived desktop app may not cold start for days.
+- **Your frontend is tiny.** If the bundle is 200 KB, a full store release is
+  not the bottleneck and this is machinery you do not need.
+- **You cannot control the signing key's custody.** A compromised key cannot be
+  fully retired until a shell update ships. If that is unacceptable, so is this.
+- **You are shipping `mod` or `dlc` content to mobile.** Those pack kinds do not
+  compile for App Store targets. That is not an oversight.
 
-// Point at a staging server for QA
-await configure({
-  endpoint: 'https://staging.example.com/api/updates/{{current_sequence}}'
-});
-```
+## Further reading
 
-### Split download/activate
-
-`applyUpdate()` does everything in one call. But if you want more control — download in the background, activate on next launch, prompt the user first — use `downloadUpdate()` + `activateUpdate()` separately.
-
-### Custom bundle format
-
-tar.gz works out of the box. Enable `features = ["zip"]` for zip archives. The extraction layer is internal, but the manifest format is open — you control what URL the bundle lives at and how it's hosted.
-
----
-
-## What this plugin is not
-
-- **Not a CDN.** You host the bundles. S3, Cloudflare R2, your own Nginx — anything that serves files over HTTPS.
-- **Not a build system.** You build and sign the bundle. The plugin handles everything after that.
-- **Not a CI pipeline.** You upload and publish the manifest. The plugin checks and downloads it.
-
-The plugin is the last mile: check → download → verify → extract → serve. Everything before that is yours.
+- [Architecture](./architecture.md) — what runs when
+- [Overlay resolution](./overlay.md) — how layers stack
+- [Disk layout](./disk-layout.md) — what lives where, and what the OS may delete
+- [Security](./security.md) — threat model and store boundaries

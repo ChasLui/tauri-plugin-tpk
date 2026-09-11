@@ -72,18 +72,22 @@ Content pack kinds by platform:
 ```mermaid
 flowchart TD
     A["Your CDN / S3 / any HTTPS host
-    manifest.json
-    signed frontend.tar.gz"] -- "download + verify signature" --> B
-    B["Tauri App
-
-    HotswapAssets::get(key)
-    1. filesystem (cached)
-    2. embedded (fallback)"]
+    latest.json + latest.json.minisig
+    core-2.1.0.tpk"] -- "download, verify signature and digests" --> B
+    B["Tauri app
+    PackAssets::get(key)
+    1. overlay layers (base / patch / dlc)
+    2. embedded assets (fallback)"]
 ```
+
+Packs are parsed out of a ZIP into memory and served through Tauri's `Assets`
+trait. Nothing executable is written to disk. For any path, the highest layer
+that mentions it wins — and a `delete` tombstone hides even an embedded asset.
 
 ---
 
 <a id="quickstart"></a>
+
 ## 🚀 Quickstart
 
 ### 1. Install
@@ -95,122 +99,131 @@ tauri-plugin-tpk = "0.1.0"
 ```
 
 ```bash
-npm install tauri-plugin-tpk-api
+pnpm add tauri-plugin-tpk-api
+cargo install tpk-cli
 ```
 
-### 2. Configure
+### 2. Generate a signing key
 
-Add to your `tauri.conf.json`:
+```bash
+tpk keygen --out tpk-secret.key   # prints the public key
+```
+
+Keep the secret key in a CI secret. Never commit it.
+
+### 3. Configure
 
 ```json
 {
   "plugins": {
     "tpk": {
-      "endpoint": "https://your-server.com/api/updates/{{current_sequence}}",
-      "pubkey": "<YOUR_MINISIGN_PUBKEY>"
+      "manifest_url": "https://cdn.example.com/tpk/{{channel}}/latest.json",
+      "pubkeys": [{ "key": "<YOUR_MINISIGN_PUBKEY>", "epoch": 1 }]
     }
   }
 }
 ```
 
-> **Config source matters:**
-> - `init(context)` reads `plugins.tpk` from `tauri.conf.json` and requires it.
-> - `init_with_config(context, config)` and `TpkBuilder` are programmatic paths; `plugins.tpk` in JSON is optional for these.
+That is the whole required set — everything else has a default. The URL template
+accepts `{{channel}}`, `{{arch}}`, `{{target}}` and `{{shell}}`, and nothing
+else. There is no runtime setter for either field: a scripting bug in your
+frontend must not be able to repoint the updater.
 
-### 3. Register the plugin
+### 4. Register the plugin
 
 ```rust
 // src-tauri/src/lib.rs
 pub fn run() {
-    let context = tauri::generate_context!();
-    // init() consumes the context to swap the asset provider,
-    // then returns the modified context alongside the plugin.
-    let (tpk, context) = tauri_plugin_tpk::init(context)
-        .expect("failed to initialize tpk");
+    let mut context = tauri::generate_context!();
+
+    // `attach` swaps the asset provider before the app is built. It resolves no
+    // paths and opens no files — on Android the data directory is not reachable
+    // this early — so everything stateful happens in the plugin's setup hook.
+    let tpk = tauri_plugin_tpk::attach(&mut context);
 
     tauri::Builder::default()
-        .plugin(tpk)
+        .plugin(tauri_plugin_tpk::init(tpk))
         .run(context)
-        .expect("error running app");
+        .expect("error while running tauri application");
 }
 ```
 
-Programmatic alternative (no `plugins.tpk` required in `tauri.conf.json`):
-
-```rust
-let context = tauri::generate_context!();
-let config = tauri_plugin_tpk::TpkConfig::new("<YOUR_MINISIGN_PUBKEY>")
-    .endpoint("https://your-server.com/api/updates/{{current_sequence}}");
-let (tpk, context) = tauri_plugin_tpk::init_with_config(context, config)
-    .expect("failed to initialize tpk");
-```
-
-### 4. Add capability
-
-In `src-tauri/capabilities/default.json`:
+### 5. Add the capability
 
 ```json
 {
   "identifier": "default",
   "windows": ["main"],
-  "permissions": [
-    "core:default",
-    "tpk:default"
-  ]
+  "permissions": ["core:default", "tpk:default"]
 }
 ```
 
-### 5. Use from the frontend
+`tpk:default` grants `check`, `download`, `notify_ready` and `status`. `reset`
+needs `tpk:allow-reset` and is deliberately not in the default set.
+
+### 6. Wire the frontend
 
 ```typescript
-import { checkUpdate, applyUpdate, notifyReady } from 'tauri-plugin-tpk-api';
+import { check, download, notifyReady } from 'tauri-plugin-tpk-api';
 
-// ✅ Confirm current version works (call on every startup)
+// Acknowledge the running revision — after your first screen has rendered,
+// not at the top of your entry point. Until this is called the revision is on
+// trial, and three unacknowledged launches roll it back.
+await router.isReady();
+await firstDataLoad();
 await notifyReady();
 
-// 🔍 Check for updates
-const result = await checkUpdate();
-
-if (result.available) {
-  // ⬇️ Download, verify, and activate
-  await applyUpdate();
-
-  // 🔄 Reload to serve new assets
-  window.location.reload();
+const result = await check();
+if (result.status === 'available') {
+  await download();
+  toast('Update ready — it will apply next time you open the app.');
 }
 ```
 
-That's it. A few lines to add OTA updates to your Tauri app.
+`check()` and `download()` return a `status` for every ordinary answer —
+`up_to_date`, `shell_required`, `disabled`, `degraded`. A rejected promise means
+something you cannot act on.
 
-You can also change configuration at runtime — for example, to switch channels without restarting:
+There is no way to swap layers in a running process, on purpose: a WebView that
+has already imported half a bundle would mix modules from two revisions.
 
-```typescript
-import { configure } from 'tauri-plugin-tpk-api';
+### 7. Publish
 
-// Switch to a beta channel at runtime
-await configure({ channel: 'beta' });
+```bash
+pnpm build
+
+tpk pack --kind base --id core \
+  --version 2.1.0 --version-code "$(date -u +%Y%m%d%H%M%S)" \
+  --created-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --dist dist/ --out core-2.1.0.tpk
+
+tpk channel --channel stable --pack core-2.1.0.tpk \
+  --url-base https://cdn.example.com/tpk/core/ \
+  --watermark auto --out latest.json
+
+tpk verify --pubkey "$TPK_PUBKEY" --file latest.json --file core-2.1.0.tpk
+
+# Packs first, manifest last.
 ```
 
 ---
 
-## ✨ Features
+## ✨ What you get
 
-| Feature | Description |
-|---------|-------------|
-| 🔐 **Signed bundles** | Every download is verified with minisign before extraction |
-| ↩️ **Auto-rollback** | If `notifyReady()` isn't called, the next launch rolls back automatically |
-| 📡 **Channels** | Route users to `production`, `staging`, `beta` — switchable at runtime via `configure()` |
-| 🔑 **Custom headers** | Auth tokens, API keys — sent on every check and download request |
-| 🔄 **Retry with backoff** | Failed downloads retry automatically (1s → 2s → 4s → 8s) |
-| 🔀 **Download/activate split** | Download now, apply later — you control the timing |
-| 📊 **Lifecycle events** | `tpk://lifecycle` events for telemetry (Sentry, PostHog, etc.) |
-| 📏 **Bundle size + mandatory flag** | Warn users on mobile data, force security patches |
-| 🌍 **Platform-aware** | Sends `platform`, `arch`, `channel` on every check request |
-| 🛡️ **Size limits** | Configurable max bundle size prevents memory exhaustion |
-| 🔒 **HTTPS enforced** | Non-HTTPS URLs rejected by default |
-| ⚡ **Atomic operations** | Temp dir extraction + rename; temp file pointer writes |
-| 🤖 **Custom resolvers** | `HotswapResolver` trait — bring your own update source |
-| 📦 **Zip support** | Enable with `features = ["zip"]` |
+| Property | What it means |
+|---|---|
+| 🔐 **Signed content** | minisign (Ed25519, prehashed) over the manifest, SHA-256 on every pack and every blob |
+| ↩️ **Automatic rollback** | Three launches without `notifyReady()` and the revision rolls back and is blacklisted |
+| 🧱 **Layered packs** | `base` / `patch` / `dlc` / `mod` stack over the embedded assets; highest layer wins |
+| 📉 **bsdiff deltas** | A hotfix is kilobytes. Tombstones can hide files the binary still embeds |
+| 🔑 **Key rotation** | Multiple trusted keys with a monotonic `key_epoch` floor |
+| 🎚️ **Staged rollout** | Deterministic per-device bucketing; widening a rollout is a superset |
+| ⏮️ **Replay protection** | Monotonic watermark, tracked per channel |
+| ⚛️ **Atomic state** | Content-addressed layer pool; promotion is one `state.json` write with a directory fsync |
+| 🧯 **Degraded mode** | Three consecutive rollbacks and automatic updating stops |
+| 🔒 **https enforced** | Non-https manifest URLs are rejected |
+| 🛡️ **Bounded decoding** | Every blob declares its encoded size; delta output is bounded by the signed size |
+| 🗂️ **Static hosting** | A signed JSON file and some `.tpk` files. No API, no session, no vendor |
 
 ---
 
@@ -218,25 +231,43 @@ await configure({ channel: 'beta' });
 
 | Document | Description |
 |----------|-------------|
-| **[Design Philosophy](docs/philosophy.md)** | Opinionated defaults, extensible when you need it |
-| **[Configuration](docs/configuration.md)** | All config options, builder API, tauri.conf.json reference |
-| **[API Reference](docs/api-reference.md)** | Full JS and Rust API with examples |
-| **[Server Contract](docs/server-contract.md)** | What your update endpoint needs to return |
-| **[Security](docs/security.md)** | Threat model, mitigations, signing guide |
-| **[Architecture](docs/architecture.md)** | How the plugin works internally |
-| **[Creating Bundles](docs/creating-bundles.md)** | Build, sign, upload your frontend bundles |
-| **[CONTRIBUTING](CONTRIBUTING.md)** | How to contribute to this project |
+| **[Philosophy](docs/philosophy.md)** | Why this exists, and when not to use it |
+| **[Configuration](docs/configuration.md)** | Every field of `plugins.tpk`, and the permissions |
+| **[API Reference](docs/api-reference.md)** | The TypeScript and Rust surfaces |
+| **[Packaging](docs/packaging.md)** | Building, signing and publishing with the CLI |
+| **[Architecture](docs/architecture.md)** | The crates, startup, the state machine |
+| **[Overlay Resolution](docs/overlay.md)** | How layers stack and what wins |
+| **[Disk Layout](docs/disk-layout.md)** | What lives where, and what the OS may delete |
+| **[Server Contract](docs/server-contract.md)** | The channel manifest |
+| **[Security](docs/security.md)** | Threat model and store boundaries |
+| **[App Review Checklist](docs/app-review-checklist.md)** | What to disclose and test before submitting |
+| **[The Updater Boundary](docs/updater-boundary.md)** | Pack or binary |
+| **[Error Codes](docs/error-codes.md)** | The fourteen frozen codes |
+| **[Local Testing](docs/local-testing.md)** | Serving a channel from your laptop |
+| **[Migrating](docs/migrating-from-hotswap.md)** | Coming from the previous plugin |
+| **[CONTRIBUTING](CONTRIBUTING.md)** | How to contribute |
 | **[CHANGELOG](CHANGELOG.md)** | Version history |
+
+The frozen format contract is [`spec/tpk-v1.md`](spec/tpk-v1.md). **Appendix A
+overrides the body** — it records where the original specification conflicts with
+Tauri's real API, with store policy, and with measured performance.
 
 ---
 
 ## 🛡️ Security
 
-Every update is **cryptographically signed** with minisign and verified before extraction. The plugin is designed to fail safely — if anything goes wrong, the app falls back to embedded assets.
+Content is signed with minisign and verified before it is used; every blob
+carries its own digest, checked before decoding and again after. Nothing
+executable is written to disk and no dynamic library is loaded.
 
-See the full [Security documentation](docs/security.md) for the threat model and all mitigations.
+One thing that surprises people: **pack content runs on `tauri://localhost` and
+inherits every capability granted to that window.** If the window has
+`shell:allow-execute`, a signed content pack is equivalent to arbitrary native
+code execution. Audit `src-tauri/capabilities/` before you ship, and assert
+`status().unsafe_capabilities` is empty in a smoke test.
 
----
+See [docs/security.md](docs/security.md) for the full threat model, the real key
+rotation SLA, and the store compliance boundaries.
 
 ## License
 

@@ -2,14 +2,14 @@
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
   "productName": "tpk-example",
   "version": "0.1.0",
-  "identifier": "com.example.hotswap",
+  "identifier": "com.example.tpk",
   "build": {
     "frontendDist": "../src"
   },
   "app": {
     "windows": [
       {
-        "title": "Hotswap Example",
+        "title": "TPK Example",
         "width": 800,
         "height": 600
       }

@@ -1,158 +1,172 @@
 ---
-title: Server Endpoint Contract
+title: Server contract
+description: The channel manifest, what the server must guarantee, and what it must never do.
 ---
 
-# 🌐 Server Endpoint Contract
+# Server contract
 
-This document describes what your update server needs to implement. The default `HttpResolver` makes requests following this contract.
+The server is a static file host. There is no API, no session, no negotiation.
+Two kinds of file:
 
----
+- `latest.json` — the channel manifest, plus `latest.json.minisig`
+- `*.tpk` — the packs, plus nothing (their signature is inside)
 
-## Check Request
+Any CDN or object store will do.
 
-```
-GET https://your-server.com/api/updates/42?binary_version=0.1.0&platform=macos&arch=aarch64&channel=production
-```
-
-### URL
-
-The `endpoint` from your config, with `{{current_sequence}}` replaced by the client's current sequence number (e.g. `42`).
-
-### Query Parameters
-
-| Param | Always sent | Description |
-|-------|-------------|-------------|
-| `binary_version` | ✅ | The native binary version from `tauri.conf.json` |
-| `platform` | ✅ | `macos`, `windows`, `linux`, `android`, or `ios` |
-| `arch` | ✅ | `x86_64`, `aarch64`, `x86`, or `arm` |
-| `channel` | Only if set | The configured update channel. Only sent if a channel has been set (via config or `configure()` at runtime). If not set, the parameter is omitted entirely. |
-
-### Custom Headers
-
-If `headers` is configured, all headers are sent on the check request. Common patterns:
-
-```
-Authorization: Bearer eyJhbGciOi...
-X-API-Key: sk_live_...
-X-Device-Id: <uuid>
-```
-
----
-
-## Responses
-
-### No update available
-
-Return **204 No Content** with an empty body.
-
-```
-HTTP/1.1 204 No Content
-```
-
-### Update available
-
-Return **200 OK** with a JSON body:
+## Channel manifest
 
 ```json
 {
-  "version": "0.1.0-ota.3",
-  "sequence": 43,
-  "min_binary_version": "0.1.0",
-  "url": "https://cdn.example.com/bundles/v0.1.0-ota.3/frontend.tar.gz",
-  "signature": "untrusted comment: signature from minisign secret key\nRWQ...<base64>...",
-  "notes": "Fixed login button on dark mode",
-  "pub_date": "2026-04-05T12:00:00.000Z",
-  "mandatory": false,
-  "bundle_size": 2097152
+  "spec": "tpk-channel/1",
+  "channel": "stable",
+  "published_at": "2026-09-11T12:00:00Z",
+  "watermark": 202609111200,
+  "key_epoch": 1,
+  "min_shell": "1.4.0",
+  "notes": "Fixes the checkout button.",
+  "packs": [
+    {
+      "id": "core",
+      "kind": "base",
+      "version": "2.1.0",
+      "version_code": 20260911120000,
+      "url": "https://cdn.example.com/tpk/core/core-2.1.0.tpk",
+      "size": 1048576,
+      "sha256": "a3f1...",
+      "rollout": 100
+    }
+  ]
 }
 ```
 
-### Field Reference
+`spec` must be exactly `tpk-channel/1`. Build it with `tpk channel`, never by
+hand — the CLI computes sizes and digests from the actual files, which is the
+whole point.
 
-| Field | Required | Type | Description |
-|-------|----------|------|-------------|
-| `version` | ✅ | `string` | Display version. Not used for comparison — purely for UI. |
-| `sequence` | ✅ | `number` | Monotonic counter. **Higher = newer.** This is the only value used for ordering. |
-| `min_binary_version` | ✅ | `string` | Minimum binary version required (semver). The client rejects the update if the running binary is older. |
-| `url` | ✅ | `string` | HTTPS URL to the `.tar.gz` or `.zip` asset bundle. |
-| `signature` | ✅ | `string` | Minisign signature. Either raw (starting with `untrusted comment:`) or base64-encoded. |
-| `notes` | ❌ | `string` | Release notes. Passed through to the frontend for display. |
-| `pub_date` | ❌ | `string` | Publication date (RFC 3339 / ISO 8601). Informational only — not used for ordering. |
-| `mandatory` | ❌ | `boolean` | Hint to the frontend that this update should be applied immediately (e.g. security patch). The plugin does **not** enforce this — your frontend decides. |
-| `bundle_size` | ❌ | `number` | Bundle size in bytes. Exposed so the frontend can warn users on metered connections. |
+### Fields
 
----
+| Field | Required | Meaning |
+|---|---|---|
+| `spec` | ✅ | `"tpk-channel/1"` |
+| `channel` | ✅ | Must match the client's configured channel |
+| `published_at` | ✅ | RFC 3339 |
+| `watermark` | ✅ | Monotonic freshness marker, compared per channel |
+| `key_epoch` | | Signing key generation. Default `1` |
+| `min_shell` | | Lowest shell version any pack supports |
+| `force_shell` | | Below this, no pack is applied at all |
+| `notes` | | Truncated to 200 characters on parse |
+| `packs` | ✅ | What is on offer |
 
-## Versioning Strategy
+### `packs[]`
 
-The `sequence` field is a monotonic counter — the only thing the plugin compares. Versions are **not** compared with semver.
+| Field | Required | Meaning |
+|---|---|---|
+| `id` | ✅ | `[a-z0-9][a-z0-9-]{0,62}` |
+| `kind` | ✅ | `base` / `patch` / `dlc` / `mod` |
+| `version` | ✅ | SemVer, for humans |
+| `version_code` | ✅ | Monotonic ordering key, per id |
+| `parent_version_code` | for `patch` | The exact `version_code` this applies on top of |
+| `url` | ✅ | Absolute https URL |
+| `size` | ✅ | Exact byte size of the `.tpk` |
+| `sha256` | ✅ | Digest of the `.tpk` file, lowercase hex |
+| `optional` | | Clients may skip it. Default `false` |
+| `rollout` | | 1..=100. Default `100` |
 
-Recommended convention:
+`(id, version_code)` must be unique within a manifest.
 
-| Event | Version | Sequence |
-|-------|---------|----------|
-| Binary release v0.1.0 | `0.1.0` | — |
-| First hotfix | `0.1.0-ota.1` | 1 |
-| Second hotfix | `0.1.0-ota.2` | 2 |
-| Next binary release v0.2.0 | `0.2.0` | — |
-| First hotfix for v0.2.0 | `0.2.0-ota.1` | 3 |
+## Signature
 
-> 💡 Sequences are global, not per-binary-version. Your server should only return updates where `min_binary_version <= client's binary_version`.
+`latest.json.minisig` is a detached minisign signature over the manifest bytes,
+in **prehashed mode** — the `ED` tag, signing a BLAKE2b-512 of the payload.
+That is minisign's default; legacy `Ed` signatures are not accepted.
 
----
+Scrypt-encrypted secret keys are deliberately unsupported. CI reads the key from
+the environment, and a passphrase in a CI variable protects nothing while adding
+a way to get the automation wedged.
 
-## Binary Compatibility
+```bash
+tpk channel --channel stable --pack core-2.1.0.tpk \
+  --url-base https://cdn.example.com/tpk/core/ \
+  --out latest.json
+# `tpk channel` signs the manifest it writes
+```
 
-The plugin enforces compatibility at three levels:
+## Watermark
 
-1. **Server-side** (your responsibility): Only return manifests where `min_binary_version <= binary_version` from the query param.
-2. **Client-side (download)**: The plugin rejects the manifest if the running binary is older than `min_binary_version`.
-3. **Client-side (startup)**: Cached assets are discarded if the binary was upgraded past the cache's `min_binary_version` (configurable via `binary_cache_policy`).
+Monotonic, per channel. The client records the highest it has seen for each
+channel and refuses anything lower, which is what stops an attacker replaying
+last month's manifest to undo a security fix.
 
----
+Per channel, not global: a single scalar makes a stable→beta→stable switch
+discard every stable manifest forever, with no error anywhere.
 
-## Download Request
+Use UTC `YYYYMMDDHHMM` — `tpk channel --watermark auto` does. It is monotonic,
+stateless, and unaffected by moving the repository or rebuilding CI. A counter in
+a file will eventually be reset by someone.
 
-When the user calls `applyUpdate()` or `downloadUpdate()`, the plugin fetches the bundle from the `url` in the manifest:
+Equal watermarks are accepted, so republishing an identical manifest is safe.
+
+## `key_epoch`
+
+Declares which key generation signed this manifest. The client keeps a monotonic
+floor and refuses anything below it. Bump it in the same publish that introduces
+a new key, and never lower it. See
+[Security](./security.md#key-rotation-and-its-real-sla) for what this actually
+buys you.
+
+## Shell gating
+
+`min_shell` is advisory per pack; the client skips packs the running shell is
+too old for and reports `shell_required` if nothing is left.
+
+`force_shell` is a blunt instrument: below it, **no** pack is applied, including
+hotfixes for the version you are trying to retire. Use it when the shell should
+not receive content at all, not to nudge people to upgrade.
+
+## Staged rollout
+
+`rollout` is a percentage. The client buckets itself with
+`sha256(install_id:id:version_code)` — deterministic per device and per release,
+so a device never flips in and out of a rollout, and raising 10 → 50 is a
+superset rather than a reshuffle.
+
+There is no server-side cohort tracking, and no way to target a device. That is
+a feature: the manifest is a static file and stays one.
+
+## Caching
 
 ```
-GET https://cdn.example.com/bundles/v0.1.0-ota.3/frontend.tar.gz
-Authorization: Bearer eyJhbGciOi...
+latest.json         Cache-Control: max-age=60
+latest.json.minisig Cache-Control: max-age=60
+*.tpk               Cache-Control: max-age=31536000, immutable
 ```
 
-Custom headers are sent on download requests too. The response must be the raw bundle file (`.tar.gz` or `.zip`).
+Packs are content-addressed by the digest in the manifest, so they are immutable
+by construction. Never overwrite a published `.tpk` — clients that already saw
+the old digest will reject the new bytes, correctly, and you will spend an
+afternoon on it.
 
----
+## Range requests
 
-## Example Server (Node.js)
+Pack URLs should support `Range`. Without it an interrupted download starts over
+rather than resuming. The client handles a server that answers `200` to a Range
+request by discarding the partial file and starting again, so this is a
+performance requirement, not a correctness one.
 
-A minimal update endpoint:
+## Publishing order
 
-```javascript
-app.get('/api/updates/:currentSequence', async (req, res) => {
-  const { currentSequence } = req.params;
-  const { binary_version, platform, arch, channel } = req.query;
+1. Upload the `.tpk` files
+2. Wait for CDN propagation
+3. Upload `latest.json` and `latest.json.minisig`
 
-  const latest = await db.getLatestUpdate({
-    platform,
-    arch,
-    channel: channel || 'production',
-    minBinaryVersion: { $lte: binary_version },
-  });
+Manifest last, always. A manifest advertising a pack that is not yet reachable
+produces download failures for every client that polls in the gap.
 
-  if (!latest || latest.sequence <= Number(currentSequence)) {
-    return res.status(204).send();
-  }
+## Verifying before you publish
 
-  res.json({
-    version: latest.version,
-    sequence: latest.sequence,
-    min_binary_version: latest.minBinaryVersion,
-    url: latest.bundleUrl,
-    signature: latest.signature,
-    notes: latest.notes,
-    mandatory: latest.mandatory,
-    bundle_size: latest.bundleSize,
-  });
-});
+```bash
+tpk verify --pubkey "RWT..." --file latest.json --file core-2.1.0.tpk
 ```
+
+Exit code `0` clean, `2` verification failed, `3` bad input. Wire it into the
+publish job between packing and upload. See [Packaging](./packaging.md).
