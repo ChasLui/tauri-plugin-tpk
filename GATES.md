@@ -23,7 +23,8 @@ assumed.
 - [x] G3: the workspace test suite still passes after the lockfile bump
   CHECK: node scripts/gate-tests.mjs
   EXPECT: GATE_TESTS_PASS
-  EVIDENCE: 342 tests passed (341 before, plus the G4 regression test).
+  EVIDENCE: 347 tests passed (341 before, plus the G4 regression test and the
+    five golden-fixture assertions).
 
 - [x] G4: a pack built on Windows 11 is byte-identical to one built on macOS
       from the same input, `--version-code` and `--created-at`. This is the
@@ -48,7 +49,7 @@ assumed.
     answers 200 on /, /overlay/ and /app-review-checklist/ — so the deploy is
     confirmed from the outside, not just from a green job.
 
-- [ ] G7: `cargo publish --workspace --dry-run` succeeds on a clean machine.
+- [x] G7: `cargo publish --workspace --dry-run` succeeds on a clean machine.
       It cannot be measured on this host: `~/.cargo/config.toml` replaces
       crates-io with an `rsproxy-sparse` mirror, CARGO_HOME is not honoured
       here, and the replacement cannot be unset through `--config`. So the
@@ -56,7 +57,9 @@ assumed.
       also makes it a permanent gate rather than a one-off check
   CHECK: node scripts/gate-ci-green.mjs
   EXPECT: GATE_CI_GREEN_PASS
-  EVIDENCE: pending
+  EVIDENCE: the new Packaging job ran `cargo publish --workspace --dry-run`
+    (verbatim as release.yml does, including the gitignored README copy and no
+    --allow-dirty) and succeeded. commit 8f11720: 10/10 CI jobs.
 
 <!--
 G7 shares gate-ci-green's oracle on purpose: the packaging job is part of the
