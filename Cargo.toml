@@ -31,9 +31,9 @@ tokio = { version = "1", features = ["fs", "io-util", "time"] }
 semver = { version = "1", features = ["serde"] }
 minisign-verify = "0.2"
 thiserror = "2"
-base64 = "0.22"
+base64 = "0.23"
 url = "2"
-sha2 = "0.10"
+sha2 = "0.11"
 # zip: default-features MUST stay off. The default feature set pulls in
 # zstd-sys (C bindings), bzip2, lzma-rust2 and ppmd-rust at runtime.
 zip = { version = "8", default-features = false, features = ["deflate"] }
@@ -47,7 +47,7 @@ clap = { version = "4", features = ["derive"] }
 # Signing (build machines only, behind tpk-format/pack). Pinned to the digest
 # 0.10 generation so they share sha2's traits instead of forking the graph.
 ed25519-compact = "2.4"
-blake2 = "0.10"
+blake2 = "0.11"
 tempfile = "3"
 # Dev-only: keeps spec/json-schema and the Rust parsers from drifting apart.
 jsonschema = "=0.56"
