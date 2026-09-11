@@ -2,9 +2,14 @@
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
+mod cmd_channel;
 mod cmd_inspect;
 mod cmd_keygen;
+mod cmd_pack;
+mod cmd_sign;
 mod cmd_verify;
+mod html_policy;
+mod key_source;
 
 use std::process::ExitCode;
 
@@ -26,6 +31,12 @@ struct Cli {
 enum Command {
     /// Generate an unencrypted minisign key pair.
     Keygen(cmd_keygen::Args),
+    /// Build a signed pack from a directory.
+    Pack(cmd_pack::Args),
+    /// Sign a file, producing a detached `.minisig`.
+    Sign(cmd_sign::Args),
+    /// Build and sign the channel manifest.
+    Channel(cmd_channel::Args),
     /// Print a pack's manifest. Does not verify the signature.
     Inspect(cmd_inspect::Args),
     /// Verify packs and channel manifests against a public key.
@@ -36,6 +47,9 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Keygen(args) => cmd_keygen::run(&args),
+        Command::Pack(args) => cmd_pack::run(&args),
+        Command::Sign(args) => cmd_sign::run(&args),
+        Command::Channel(args) => cmd_channel::run(&args),
         Command::Inspect(args) => cmd_inspect::run(&args),
         Command::Verify(args) => cmd_verify::run(&args),
     };
@@ -49,6 +63,7 @@ fn main() -> ExitCode {
 }
 
 /// A CLI failure carrying the exit code the specification assigns to it.
+#[derive(Debug)]
 pub struct CliError {
     /// Message shown to the operator on stderr.
     pub message: String,

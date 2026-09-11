@@ -11,6 +11,8 @@ pub mod channel;
 pub mod container;
 pub mod error;
 pub mod manifest;
+#[cfg(feature = "pack")]
+pub mod pack;
 pub mod path;
 #[cfg(feature = "pack")]
 pub mod secret;
@@ -23,6 +25,8 @@ pub use manifest::{
     Encoding, Entry, Op, PackId, PackKind, PackManifest, PackPolicies, ParentRef, Sha256Hex,
     SPEC_TAG,
 };
+#[cfg(feature = "pack")]
+pub use pack::{compressed_size, PackBuilder, PackSummary};
 pub use path::{normalize_asset_key, PackPath};
 #[cfg(feature = "pack")]
 pub use secret::SecretKey;

@@ -190,6 +190,24 @@ impl UnverifiedPack {
     }
 }
 
+#[cfg(feature = "pack")]
+impl UnverifiedPack {
+    /// Read a pack's entries **without** checking its signature.
+    ///
+    /// Gated behind `pack`, which only build tooling enables — the runtime
+    /// cannot reach this even by mistake. It exists so `tpk pack` can diff
+    /// against a parent artefact it just produced itself, which is not a trust
+    /// boundary. Per-blob hashes are still enforced by [`VerifiedPack::read_blob`].
+    pub fn into_local_reader(self) -> Result<VerifiedPack> {
+        let manifest = PackManifest::parse(&self.manifest_bytes)?;
+        Ok(VerifiedPack {
+            archive: self.archive,
+            manifest,
+            manifest_sha256: self.manifest_sha256,
+        })
+    }
+}
+
 /// A pack whose manifest signature verified against a trusted key.
 pub struct VerifiedPack {
     archive: zip::ZipArchive<File>,
