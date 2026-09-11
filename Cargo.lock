@@ -4976,6 +4976,7 @@ dependencies = [
 name = "tpk-resolve"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "globset",
  "log",
  "sha2",
