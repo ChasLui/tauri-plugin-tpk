@@ -48,7 +48,22 @@ assumed.
     answers 200 on /, /overlay/ and /app-review-checklist/ — so the deploy is
     confirmed from the outside, not just from a green job.
 
+- [ ] G7: `cargo publish --workspace --dry-run` succeeds on a clean machine.
+      It cannot be measured on this host: `~/.cargo/config.toml` replaces
+      crates-io with an `rsproxy-sparse` mirror, CARGO_HOME is not honoured
+      here, and the replacement cannot be unset through `--config`. So the
+      measurement is moved to a CI job on a runner that has no mirror, which
+      also makes it a permanent gate rather than a one-off check
+  CHECK: node scripts/gate-ci-green.mjs
+  EXPECT: GATE_CI_GREEN_PASS
+  EVIDENCE: pending
+
 <!--
+G7 shares gate-ci-green's oracle on purpose: the packaging job is part of the
+CI workflow, and that checker already requires every job to have concluded
+success. It is a separate gate because it is a separate outcome — a green CI
+without a packaging job proved nothing about publishability.
+
 G6 is manual because it is blocked on a repository setting (GitHub Pages is not
 enabled on the new repo), which is an outward-facing change and the owner's
 call, not something a check should make true on its own.
