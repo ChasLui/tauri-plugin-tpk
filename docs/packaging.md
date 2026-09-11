@@ -61,8 +61,14 @@ CREATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ```
 
 Determinism also comes from sorted entries, a fixed DOS-epoch mtime, `Stored`
-ZIP entries and a fixed zstd level. You get it for free as long as you pin this
-one flag.
+ZIP entries, a fixed zstd level, and a fixed ZIP host system. You get it for
+free as long as you pin this one flag.
+
+That last one is not theoretical. The `zip` crate stamps the *building* host
+into each central directory header's "version made by" — 3 on Unix, 0 on
+Windows — so before it was pinned, the same input packed on Windows and on
+Linux produced files that differed by one byte per entry and therefore by
+SHA-256. Verified byte-identical across macOS and Windows 11.
 
 ### Other flags
 

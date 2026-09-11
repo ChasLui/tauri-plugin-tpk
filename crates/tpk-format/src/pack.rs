@@ -341,13 +341,25 @@ pub fn compressed_size(bytes: &[u8]) -> Result<usize> {
         .map_err(|e| FormatError::Spec(format!("zstd encode failed: {e}")))
 }
 
-/// Fixed timestamp and no extra fields, so two runs produce identical bytes.
+/// Fixed timestamp, fixed host system and no extra fields, so two runs produce
+/// identical bytes — including two runs on different operating systems.
 fn deterministic_options() -> zip::write::FileOptions<'static, ()> {
     zip::write::FileOptions::default()
         .compression_method(zip::CompressionMethod::Stored)
         .last_modified_time(
             zip::DateTime::from_date_and_time(1980, 1, 1, 0, 0, 0).expect("valid DOS epoch"),
         )
+        // Without this the `zip` crate stamps the *building* host into the high
+        // byte of each central directory header's "version made by": 3 on Unix,
+        // 0 on Windows. Everything else about the archive matches, so a pack
+        // built on Windows differed from the same pack built on Linux by
+        // exactly one byte per entry — enough to change the file's SHA-256,
+        // which is what the channel manifest publishes and what the blacklist
+        // matches on.
+        .system(zip::System::Unix)
+        // `system` alone is not enough: the external attributes are derived
+        // from the host too, so pin the mode rather than inheriting an umask.
+        .unix_permissions(0o644)
 }
 
 fn blob_name(sha: &Sha256Hex, encoding: Encoding) -> String {
@@ -642,5 +654,46 @@ mod tests {
             .verify(&trust(&key), None, 1, 1)
             .unwrap();
         assert!(!pack.manifest().policies.trusted);
+    }
+
+    #[test]
+    fn the_container_records_a_fixed_host_system_not_the_building_one() {
+        // The `zip` crate defaults "version made by" to whatever host is
+        // building: 3 (Unix) on macOS and Linux, 0 (FAT) on Windows. Every
+        // other byte of the archive matched, so a pack built on Windows
+        // differed from the same pack built on Linux by one byte per central
+        // directory entry — enough to change the file's SHA-256, which is what
+        // the channel manifest publishes and what the blacklist matches on.
+        //
+        // Caught by building the same fixture on macOS and in a Windows 11 VM;
+        // this test is the part of that check that fits in CI.
+        const Z_UNIX: u8 = 3;
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("host.tpk");
+        let key = SecretKey::generate();
+        let mut b = builder();
+        b.add_full("/index.html", b"<!DOCTYPE html><html></html>")
+            .unwrap();
+        b.add_full("/a/app.js", b"export const n = 1;").unwrap();
+        b.build(&key, &out).unwrap();
+
+        let bytes = std::fs::read(&out).unwrap();
+        let mut headers = 0usize;
+        // Central directory headers start with PK\x01\x02, then a two-byte
+        // "version made by" whose high byte is the host system.
+        for i in 0..bytes.len().saturating_sub(6) {
+            if &bytes[i..i + 4] == b"PK\x01\x02" {
+                headers += 1;
+                assert_eq!(
+                    bytes[i + 5],
+                    Z_UNIX,
+                    "central directory header {headers} records host system {} rather than a fixed {Z_UNIX}; \
+                     packs built on different operating systems will not be byte-identical",
+                    bytes[i + 5],
+                );
+            }
+        }
+        assert!(headers >= 3, "expected several entries, found {headers}");
     }
 }
