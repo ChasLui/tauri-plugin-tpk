@@ -19,5 +19,10 @@ sha2.workspace = true
 log.workspace = true
 thiserror.workspace = true
 
+[features]
+default = []
+# Dev-only: lets the state-machine tests build real signed packs.
+test-packs = ["tpk-format/pack", "tpk-delta/encode"]
+
 [dev-dependencies]
 tempfile.workspace = true
