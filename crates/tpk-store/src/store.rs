@@ -71,6 +71,8 @@ pub struct Store {
     layout: Layout,
     state: StoreState,
     blacklist: Blacklist,
+    /// Set for the duration of a `stage_for_shell` call.
+    shell_version: Option<semver::Version>,
 }
 
 impl Store {
@@ -93,6 +95,7 @@ impl Store {
             layout,
             state,
             blacklist,
+            shell_version: None,
         })
     }
 
@@ -271,6 +274,26 @@ impl Store {
     /// Returns [`StoreError::Blacklisted`] if any pack is blocked, and
     /// propagates verification, materialization and IO failures.
     pub fn stage(&mut self, packs: Vec<IncomingPack>, trust: &Arc<TrustStore>) -> Result<String> {
+        self.stage_for_shell(packs, trust, None)
+    }
+
+    /// Stage, additionally enforcing each pack's own shell range.
+    ///
+    /// A channel entry carries no shell range, so `min_shell` / `max_shell` can
+    /// only be checked once the signed manifest is in hand — which is here,
+    /// before anything is written into a revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Integrity`] when a pack does not support the
+    /// running shell, plus everything [`Self::stage`] can return.
+    pub fn stage_for_shell(
+        &mut self,
+        packs: Vec<IncomingPack>,
+        trust: &Arc<TrustStore>,
+        shell_version: Option<&semver::Version>,
+    ) -> Result<String> {
+        self.shell_version = shell_version.cloned();
         let now = now_secs();
         for pack in &packs {
             let sha = sha256_hex(&pack.bytes);
@@ -446,6 +469,22 @@ impl Store {
                 self.state.min_key_epoch,
             )?;
             let manifest = verified.manifest();
+            if let Some(shell) = &self.shell_version {
+                if manifest.min_shell.as_ref().is_some_and(|min| shell < min) {
+                    return Err(StoreError::Integrity(format!(
+                        "{} requires shell >= {}, running {shell}",
+                        pack.id,
+                        manifest.min_shell.as_ref().expect("checked")
+                    )));
+                }
+                if manifest.max_shell.as_ref().is_some_and(|max| shell > max) {
+                    return Err(StoreError::Integrity(format!(
+                        "{} supports shell <= {}, running {shell}",
+                        pack.id,
+                        manifest.max_shell.as_ref().expect("checked")
+                    )));
+                }
+            }
             if manifest.id != pack.id || manifest.version_code != pack.version_code {
                 return Err(StoreError::Integrity(format!(
                     "{} declares {} version_code {}, channel said {} version_code {}",

@@ -577,6 +577,75 @@ fn recording_a_failure_blacklists_after_the_transient_threshold() {
 }
 
 #[test]
+fn a_pack_that_does_not_support_the_running_shell_is_refused() {
+    let w = World::new();
+    let path = w.build.path().join("future.tpk");
+    let mut b = PackBuilder::new(
+        PackKind::Base,
+        PackId::parse("core").unwrap(),
+        "1.0.0".parse().unwrap(),
+        1,
+        "2026-09-11T15:00:00Z",
+    )
+    .min_shell("3.0.0".parse().unwrap());
+    b.add_full("/index.html", b"needs a newer shell").unwrap();
+    b.build(&w.key, &path).unwrap();
+
+    let pack = IncomingPack {
+        bytes: std::fs::read(&path).unwrap(),
+        id: PackId::parse("core").unwrap(),
+        kind: PackKind::Base,
+        version_code: 1,
+    };
+
+    // A channel entry carries no shell range, so this can only be caught once
+    // the signed manifest is in hand.
+    let mut store = w.store();
+    let shell: semver::Version = "2.3.0".parse().unwrap();
+    let err = store
+        .stage_for_shell(vec![pack.clone()], &w.trust, Some(&shell))
+        .unwrap_err();
+    assert!(err.to_string().contains("requires shell"), "{err}");
+
+    let newer: semver::Version = "3.1.0".parse().unwrap();
+    assert!(store
+        .stage_for_shell(vec![pack], &w.trust, Some(&newer))
+        .is_ok());
+}
+
+#[test]
+fn a_pack_pinned_below_the_running_shell_is_refused() {
+    let w = World::new();
+    let path = w.build.path().join("pinned.tpk");
+    let mut b = PackBuilder::new(
+        PackKind::Base,
+        PackId::parse("core").unwrap(),
+        "1.0.0".parse().unwrap(),
+        1,
+        "2026-09-11T15:00:00Z",
+    )
+    .max_shell("2.0.0".parse().unwrap());
+    b.add_full("/index.html", b"only for old shells").unwrap();
+    b.build(&w.key, &path).unwrap();
+
+    let shell: semver::Version = "2.3.0".parse().unwrap();
+    let err = w
+        .store()
+        .stage_for_shell(
+            vec![IncomingPack {
+                bytes: std::fs::read(&path).unwrap(),
+                id: PackId::parse("core").unwrap(),
+                kind: PackKind::Base,
+                version_code: 1,
+            }],
+            &w.trust,
+            Some(&shell),
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("supports shell"), "{err}");
+}
+
+#[test]
 fn layers_are_stacked_base_then_patch() {
     let w = World::new();
     let base = w.pack(PackKind::Base, 1, None, |b| {

@@ -20,6 +20,12 @@ url.workspace = true
 log.workspace = true
 thiserror.workspace = true
 
+[features]
+default = []
+# Dev-only: lets the channel tests sign manifests.
+test-keys = ["tpk-format/pack"]
+
 [dev-dependencies]
 tempfile.workspace = true
+serde_json.workspace = true
 tokio = { version = "1", features = ["rt", "macros"] }
