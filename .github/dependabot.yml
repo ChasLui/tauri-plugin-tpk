@@ -23,3 +23,16 @@ updates:
     groups:
       js-deps:
         patterns: ["*"]
+    ignore:
+      # TypeScript 7 is the native port, and tsup 8.5.1's DTS step dies on it
+      # with `Cannot read properties of undefined (reading
+      # 'useCaseSensitiveFileNames')` — the compiler API it reaches for is gone.
+      # tsup's peer range still says `typescript: >=4.5.0`, so dependabot has no
+      # way to know, and reopens the same unmergeable PR every week.
+      #
+      # Remove this once tsup ships TS 7 support. The ESM bundle builds fine;
+      # only declaration emit is affected, so switching DTS to `tsc
+      # --emitDeclarationOnly` would also unblock it if TS 7 ever becomes worth
+      # having for a 1 KB library.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
