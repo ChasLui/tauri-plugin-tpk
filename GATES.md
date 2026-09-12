@@ -77,6 +77,14 @@ assumed.
     Isolated against a pnpm-version confound — local corepack pnpm 11.24 blocks
     esbuild's install script and fails the baseline too, so the TS 7 failure was
     reproduced under pnpm 10, which is what CI pins.
+    Resolved 2026-09-13: re-reproduced the TS 7.0.2 failure before acting on it
+    (ESM builds, DTS dies), and confirmed tsup's latest is still 8.5.1 — there
+    is nothing to upgrade to. Both PRs are closed; dependabot had auto-closed
+    each once the corresponding dependency landed on main. Added an `ignore`
+    rule for typescript majors in .github/dependabot.yml so the unmergeable PR
+    stops being recreated weekly, with the removal condition and the
+    `tsc --emitDeclarationOnly` alternative recorded in the comment. `gh pr
+    list --state open` is now empty and no dependabot branches remain.
 
 <!--
 G8 is manual: the outcome is a judgement about which bumps to take, and the
