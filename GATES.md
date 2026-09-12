@@ -86,7 +86,39 @@ assumed.
     `tsc --emitDeclarationOnly` alternative recorded in the comment. `gh pr
     list --state open` is now empty and no dependabot branches remain.
 
+- [x] G9: the guest API builds under the toolchain CI actually uses and emits
+      exactly the files `package.json` points at. TypeScript 7 is in, via
+      tsdown replacing tsup
+  CHECK: node scripts/gate-guest-js.mjs
+  EXPECT: GATE_GUEST_JS_PASS
+  EVIDENCE: tsdown 0.23.0 declares `typescript: ^5 || ^6 || ^7` and generates
+    declarations through rolldown-plugin-dts, so it does not touch the compiler
+    API TS 7 removed. Equivalence with the tsup output was checked rather than
+    assumed: 8/8 runtime exports identical, 18/18 d.ts declarations identical,
+    and a strict consumer (`skipLibCheck: false`) type-checks against the new
+    d.ts under TS 7.0.2 — control: importing a nonexistent member yields TS2305.
+    Known regression: the file-level module JSDoc no longer reaches the d.ts
+    (per-declaration JSDoc does, and it survives in the .js).
+    Two toolchain traps, both caught only after they had shipped or by this
+    gate: tsdown defaults to `platform: node`, which turns on fixedExtension and
+    emits .mjs/.d.mts — a "successful" build whose `exports` resolve to nothing;
+    fixed with `--platform neutral`, which is also what this package is. And
+    tsdown needs Node >= 22.18 while CI pinned Node 20 — pnpm does not enforce a
+    transitive tool's engines, so install passed and the build died on
+    `Promise.withResolvers is not a function`. Node pins moved to 22 and the
+    requirement is declared as devEngines (not engines: the published runtime
+    targets a WebView and has no Node requirement to impose on consumers).
+    The gate reads the Node and pnpm versions out of ci.yml instead of
+    restating them, and refuses to report success under a different Node —
+    control: it declines on Node 24 with CI pinned at 22. Second control:
+    dropping `--platform neutral` makes it report the declared entry points
+    missing.
+
 <!--
+G9 exists because two local runs reported success for builds CI rejected. The
+clippy gate already refuses to certify below CI's version; this is the same
+discipline for the JS toolchain.
+
 G8 is manual: the outcome is a judgement about which bumps to take, and the
 evidence is the experiments recorded above rather than one command.
 
