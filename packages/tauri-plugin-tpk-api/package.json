@@ -28,7 +28,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --clean",
+    "build": "tsdown src/index.ts --format esm --platform neutral --dts --clean",
     "prepublishOnly": "cp ../../README.md . && pnpm build"
   },
   "peerDependencies": {
@@ -36,7 +36,7 @@
   },
   "devDependencies": {
     "@tauri-apps/api": "^2.11.1",
-    "tsup": "^8.0.0",
-    "typescript": "^5.0.0"
+    "tsdown": "^0.23.0",
+    "typescript": "^7.0.2"
   }
 }
