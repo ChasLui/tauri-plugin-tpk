@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Update compatible Rust dependencies while retaining `tauri-utils 2.9.3` and
+  `tauri-plugin 2.6.3`: newer helpers require Rust 1.90 and fail to compile with
+  Tauri 2.11's test feature; the project keeps its declared Rust 1.88 minimum.
 - Align the TPK/1 specification, JSON Schemas, API documentation and website with
   the implemented runtime and App Store behavior; remove the obsolete hotswap
   migration guide.
