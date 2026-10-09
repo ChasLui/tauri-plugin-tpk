@@ -9,9 +9,8 @@ Two roots, and the split matters.
 
 ```
 $APPLOCALDATA/tpk/            durable — survives, must be backed up selectively
-├── state.json                the three-state pointer, watermarks, key epoch floor
+├── state.json                the three-state pointer, watermarks, version and key epoch floors
 ├── blacklist.json            condemned releases
-├── keys-cache.json           audit trail for key epoch changes
 └── layers/
     └── <file_sha256>.tpk     the content-addressed layer pool
 
@@ -19,14 +18,14 @@ $APPCACHE/tpk/                purgeable — the OS may delete this at any moment
 ├── materialized/
 │   └── <sha256>              delta results, named by the hash of their content
 └── tmp/
-    └── *.part                in-flight downloads
+    ├── *.part                in-flight downloads
+    └── <sha256>.tpk          finished downloads, deleted once download() returns
 ```
 
 ## Why a content-addressed pool
 
-The specification describes three parallel directories (`staged/`, `booting/`,
-`committed/`) holding copies of the same packs. This implementation keeps one
-pool keyed by the file's own SHA-256, and `state.json` refers into it.
+Every pack lives once in `layers/`, keyed by the file's own SHA-256; the staged,
+booting and committed revisions in `state.json` refer into that pool.
 
 That turns promotion into a single atomic `state.json` write. Moving directories
 around is not atomic, and a crash halfway through leaves a pointer to a revision
@@ -42,9 +41,14 @@ stored once.
 of the parent directory. Without that last step the rename can be reordered past
 a power loss on several filesystems and the file comes back empty.
 
-Layer files land as `.part` in the cache root and are only moved into `layers/`
-after the hash matches. A pack that is present in the pool has, by construction,
-already been verified.
+Downloads land as `.part` in the cache root and are renamed to `<sha256>.tpk`
+there once size and hash match. They are never renamed across roots into
+`layers/` — the two roots may be on different filesystems. Staging writes the
+pool copy itself with the same temp file, `fsync`, `rename` sequence, verifies
+that copy, and the files in `tmp/` are deleted when `download()` returns,
+whether it succeeded or not. A crash skips that cleanup, so when a download has
+something to fetch it first removes every `.part` and `<sha256>.tpk` in `tmp/`
+that is not part of the current plan.
 
 ## What the OS may delete
 
@@ -52,17 +56,33 @@ already been verified.
 under storage pressure without telling you; Android's cache directory is the
 first thing the system reclaims.
 
-So the lazy re-materialization path must always exist: if a delta result is
-missing when it is needed, it is rebuilt from the layer pool. Nothing in the
-durable root is ever assumed to be reconstructible from the cache root, and
+So a missing delta result is ordinary. When `setup` finds one, a background
+thread rebuilds it from the layer pool, and until then that path falls back to
+the embedded assets; staging also repairs the results it builds on. Nothing in
+the durable root is ever assumed to be reconstructible from the cache root, and
 nothing in the cache root is ever assumed to still be there.
 
 ## Backup
 
 Exclude `layers/` — it is large and entirely re-downloadable. On Apple platforms
-this is `NSURLIsExcludedFromBackupKey`, which the plugin sets. On Android it
-belongs in the host app's data extraction rules, because a plugin cannot merge
-into that manifest:
+this is `NSURLIsExcludedFromBackupKey`. The call lives in the `tpk-backup`
+crate: it is `unsafe` on Apple platforms and `tauri-plugin-tpk` is
+`#![forbid(unsafe_code)]`, so the one unsafe line sits alone in an Apple-only
+leaf crate; everywhere else it is a no-op with no dependencies.
+
+Two details decide when it runs. The flag cannot be set on a directory that does
+not exist, so it goes on after `Store::open` has created the tree, not before —
+setting it first left a fresh install's layer pool in iCloud until the second
+launch. And Apple does not document whether a file created inside an excluded
+directory inherits the flag; reports disagree. So it is re-applied after every
+successful stage, which is the only thing that adds files to the pool. One
+syscall, and setting it twice is harmless.
+
+A failure is logged and startup continues; the cost is backup quota, not a
+broken app.
+
+On Android it belongs in the host app's data extraction rules, because a plugin
+cannot merge into that manifest:
 
 ```xml
 <data-extraction-rules>
@@ -81,10 +101,11 @@ phone should not be handed a release already known to be broken.
 
 ## Garbage collection
 
-`Store::gc()` removes layer files no revision refers to. It runs after a commit,
-so the revision that was rolled back releases its exclusive layers once the
-rollback is acknowledged as final — not before, because a rollback that is
-itself rolled back needs them.
+`Store::gc()` removes layer files no staged, booting or committed revision
+refers to. It runs after `notifyReady()` successfully commits a booting
+revision, and after `reset()`. Layers orphaned by a rollback or by a staged
+revision that was dropped stay on disk until the next successful commit frees
+them. A failed collection after a commit is only logged.
 
 The blacklist is capped at 256 entries; the oldest are dropped first. A device
 that has seen more than 256 bad releases has a different problem.

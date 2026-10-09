@@ -241,6 +241,8 @@ mod tests {
             sha256: sha256_hex(content),
             optional: false,
             rollout: 100,
+            min_shell: None,
+            max_shell: None,
         }
     }
 

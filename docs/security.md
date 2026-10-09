@@ -33,14 +33,20 @@ plugin is built, and you can check each one:
 |---|---|
 | Tampered CDN | minisign signature over the manifest bytes, plus a SHA-256 on every pack in the channel manifest and on every blob inside a pack |
 | Replayed old manifest | Monotonic `watermark`, tracked per channel |
-| Downgrade to known-bad content | Monotonic `version_code` per pack id, with the floor derived from the layers actually on disk — deleting `state.json` does not lower it |
-| Half-written pack | Downloads land in `.part` and are only renamed in after the hash matches; `state.json` is written atomically with a directory fsync |
+| Downgrade to known-bad content | Monotonic `version_code` per pack id, answered by two separate numbers: what a patch may stack on comes from the layers really in the stack, while how far back an id may go comes from `version_floor` — the highest `version_code` this device ever committed, raised at commit, never lowered, and kept across both a blacklisting and a `reset` |
+| Half-written pack | Downloads land in `.part` and are finalized in the cache root only after size and hash match; staging writes the pool copy atomically (temp file, `fsync`, `rename`), and `state.json` is written atomically with a directory fsync |
 | Bad pack causing a blank screen | Three-state pointer: unacknowledged revisions roll back, and the release is blacklisted |
 | A bad release being republished | The blacklist matches on `(id, version_code)` as well as on hash, so a CI rerun does not slip past it |
 | Zip slip / path traversal | Paths are validated on parse: absolute, POSIX, NFC, no `..`, no empty segments, no drive letters, no reserved prefixes |
 | Decompression bomb | Every blob declares `blob_size`; the zstd reader is bounded by it, and delta output is bounded by the signed `size` and by `max_asset_bytes` |
 | Smuggled content | The container may only hold the manifest, its signature and blobs named by their own digest. Unreferenced blobs are rejected |
 | Key compromise | Multiple trusted keys with a monotonic `key_epoch` floor; see below |
+
+The floor has exactly one exemption: after a `reset`, bundled seed content is
+committed even if its `version_code` is below the floor. Nothing is committed at
+that point, and refusing the seed would leave the device on the embedded assets
+— the same bundled content. Everything the channel offers is still held to the
+floor, so the next successful check moves the device forward again.
 
 ## Key rotation, and its real SLA
 
@@ -171,6 +177,14 @@ verbatim as requiring in-app purchase, IAP Attachment §2.4 permits only *data*
 to be downloaded after a purchase, and §3.3.1(C) covers the free case. `mod`
 is unavailable because an enable/disable UI for third-party packages is what
 Guideline 3.2.2(i) describes.
+
+The table is enforced by the `app-store` Cargo feature: compiled with it, the
+`Dlc` and `Mod` variants do not exist, a pack manifest declaring either fails
+with `E_POLICY`, and channel entries of those kinds are dropped rather than
+failing the whole manifest (`spec/tpk-v1.md` §11.1). Without the feature a `dlc`
+pack in a channel is accepted on every platform, so a mobile build that does not
+enable it must keep `dlc` out of the channels it reads. `mod` layers are never
+loaded on any target.
 
 ## Backup and storage
 

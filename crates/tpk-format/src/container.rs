@@ -23,6 +23,15 @@ pub const MANIFEST_SIG_NAME: &str = "tpk-manifest.json.minisig";
 /// tree; anything past this is a resource-exhaustion attempt.
 pub const MAX_CONTAINER_ENTRIES: usize = 65_536;
 
+/// Ceiling on `tpk-manifest.json`, read before any signature check. Matches the
+/// client's limit on channel manifests.
+const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
+/// Ceiling on the detached signature entry; a minisign signature is a few
+/// hundred bytes.
+const MAX_SIGNATURE_BYTES: u64 = 64 * 1024;
+/// Largest up-front allocation for an entry read.
+const PREALLOC_CAP: u64 = 8 * 1024 * 1024;
+
 /// A pack whose bytes have been located but whose signature is unchecked.
 ///
 /// The only thing you can do with one is [`verify`](Self::verify).
@@ -95,15 +104,16 @@ impl UnverifiedPack {
             }
         }
 
-        let manifest_bytes = read_whole_entry(&mut archive, MANIFEST_NAME)?;
+        let manifest_bytes = read_bounded_entry(&mut archive, MANIFEST_NAME, MAX_MANIFEST_BYTES)?;
         let manifest_sha256 = sha256_hex(&manifest_bytes);
-        let signature = match read_whole_entry(&mut archive, MANIFEST_SIG_NAME) {
-            Ok(bytes) => Some(
+        let signature = if archive.file_names().any(|name| name == MANIFEST_SIG_NAME) {
+            let bytes = read_bounded_entry(&mut archive, MANIFEST_SIG_NAME, MAX_SIGNATURE_BYTES)?;
+            Some(
                 String::from_utf8(bytes)
                     .map_err(|e| FormatError::Signature(format!("signature is not UTF-8: {e}")))?,
-            ),
-            Err(FormatError::Spec(_)) => None,
-            Err(e) => return Err(e),
+            )
+        } else {
+            None
         };
 
         Ok(Self {
@@ -134,6 +144,9 @@ impl UnverifiedPack {
     /// `signature` overrides any signature embedded in the container — channel
     /// manifests carry the signature out of band.
     ///
+    /// A pack carries no key epoch of its own, so any trusted key whose epoch is
+    /// at or above `min_epoch` is accepted (see [`TrustStore::verify_at_or_above`]).
+    ///
     /// # Errors
     ///
     /// Returns [`FormatError::Signature`] when no signature is available or none
@@ -144,13 +157,12 @@ impl UnverifiedPack {
         self,
         trust: &TrustStore,
         signature: Option<&str>,
-        declared_epoch: u32,
         min_epoch: u32,
     ) -> Result<VerifiedPack> {
         let signature = signature
             .or(self.signature.as_deref())
             .ok_or_else(|| FormatError::Signature("pack carries no signature".into()))?;
-        trust.verify(&self.manifest_bytes, signature, declared_epoch, min_epoch)?;
+        trust.verify_at_or_above(&self.manifest_bytes, signature, min_epoch)?;
 
         let manifest = PackManifest::parse(&self.manifest_bytes)?;
 
@@ -249,6 +261,27 @@ impl VerifiedPack {
     /// does not match its digest, and [`FormatError::Spec`] when the entry has
     /// no blob or decoding overruns the declared size.
     pub fn read_blob(&mut self, entry: &Entry) -> Result<Vec<u8>> {
+        self.read_blob_bounded(entry, u64::MAX)
+    }
+
+    /// [`read_blob`](Self::read_blob) with a caller-imposed ceiling on the
+    /// decoded length.
+    ///
+    /// Decoding stops at `max_decoded` or at the entry's own limit (`size` for
+    /// a zstd `full` blob, a multiple of `blob_size` for a delta stream),
+    /// whichever is lower. That lets a caller with a running byte budget refuse
+    /// a delta stream mid-decode instead of learning its length only after the
+    /// whole stream is in memory. An identity blob is not decoded; it is refused
+    /// after the read if it is longer than `max_decoded`.
+    ///
+    /// # Errors
+    ///
+    /// As [`read_blob`](Self::read_blob). Exceeding `max_decoded` is also
+    /// [`FormatError::Spec`], but only when `max_decoded` was the binding
+    /// ceiling is the message prefixed with `decode budget of {max_decoded}
+    /// bytes exceeded: `, so a caller can tell its own budget apart from a
+    /// blob overrunning its declared size.
+    pub fn read_blob_bounded(&mut self, entry: &Entry, max_decoded: u64) -> Result<Vec<u8>> {
         let blob = entry
             .blob
             .as_deref()
@@ -260,7 +293,7 @@ impl VerifiedPack {
             .blob_size
             .ok_or_else(|| FormatError::Spec(format!("entry {} has no blob_size", entry.path)))?;
 
-        let raw = read_whole_entry(&mut self.archive, blob)?;
+        let raw = read_whole_entry(&mut self.archive, blob, blob_size)?;
         if raw.len() as u64 != blob_size {
             return Err(FormatError::Hash(format!(
                 "blob {blob:?} is {} bytes, manifest says {blob_size}",
@@ -279,12 +312,17 @@ impl VerifiedPack {
             .ok_or_else(|| FormatError::Spec(format!("entry {} has no encoding", entry.path)))?;
 
         let decoded = match encoding {
+            Encoding::Identity if blob_size > max_decoded => {
+                return Err(FormatError::Spec(format!(
+                    "decode budget of {max_decoded} bytes exceeded: blob {blob:?} is {blob_size} bytes"
+                )));
+            }
             Encoding::Identity => raw,
             // For a delta the decoded bytes are the patch stream, whose length
             // is unrelated to `size`; bound it by the compressed length instead,
             // which is what a zstd bomb would have to inflate past.
-            Encoding::Zstd => decode_zstd(&raw, declared_size)?,
-            Encoding::ZstdBsdiff => decode_zstd(&raw, max_patch_len(blob_size))?,
+            Encoding::Zstd => decode_zstd(&raw, declared_size, max_decoded)?,
+            Encoding::ZstdBsdiff => decode_zstd(&raw, max_patch_len(blob_size), max_decoded)?,
         };
 
         if entry.op == Op::Full {
@@ -305,7 +343,10 @@ fn max_patch_len(blob_size: u64) -> u64 {
     blob_size.saturating_mul(64).saturating_add(1 << 20)
 }
 
-fn decode_zstd(raw: &[u8], limit: u64) -> Result<Vec<u8>> {
+/// Decode at most `min(own_limit, max_decoded)` bytes, saying which of the two
+/// an over-long stream ran into.
+fn decode_zstd(raw: &[u8], own_limit: u64, max_decoded: u64) -> Result<Vec<u8>> {
+    let limit = own_limit.min(max_decoded);
     let mut decoder = ruzstd::decoding::StreamingDecoder::new(raw)
         .map_err(|e| FormatError::Spec(format!("not a zstd frame: {e}")))?;
     // limit + 1 so an over-long stream is detected rather than silently cut.
@@ -314,22 +355,46 @@ fn decode_zstd(raw: &[u8], limit: u64) -> Result<Vec<u8>> {
         .read_to_end(&mut out)
         .map_err(|e| FormatError::Spec(format!("zstd decode failed: {e}")))?;
     if read as u64 > limit {
-        return Err(FormatError::Spec(format!(
-            "zstd stream expands past its declared {limit} byte limit"
-        )));
+        return Err(FormatError::Spec(if max_decoded < own_limit {
+            // The stream may still be within its own limit; only the budget is known to be hit.
+            format!("decode budget of {max_decoded} bytes exceeded: zstd stream is longer")
+        } else {
+            format!("zstd stream expands past its declared {own_limit} byte limit")
+        }));
     }
     Ok(out)
 }
 
+/// Read one entry, stopping one byte past `limit` so the caller can tell an
+/// overrun apart. The size in the ZIP header is attacker-controlled, so it is
+/// neither trusted for allocation nor as a cap.
 fn read_whole_entry<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     name: &str,
+    limit: u64,
 ) -> Result<Vec<u8>> {
-    let mut entry = archive
+    let entry = archive
         .by_name(name)
         .map_err(|e| FormatError::Spec(format!("missing container entry {name:?}: {e}")))?;
-    let mut buf = Vec::with_capacity(entry.size() as usize);
-    entry.read_to_end(&mut buf)?;
+    // Only a small preallocation is trusted; beyond it the buffer grows with
+    // the bytes that actually arrive.
+    let mut buf = Vec::with_capacity(entry.size().min(limit).min(PREALLOC_CAP) as usize);
+    entry.take(limit.saturating_add(1)).read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+/// [`read_whole_entry`] for entries with a fixed ceiling rather than a signed size.
+fn read_bounded_entry<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    name: &str,
+    limit: u64,
+) -> Result<Vec<u8>> {
+    let buf = read_whole_entry(archive, name, limit)?;
+    if buf.len() as u64 > limit {
+        return Err(FormatError::Spec(format!(
+            "container entry {name:?} exceeds {limit} bytes"
+        )));
+    }
     Ok(buf)
 }
 
@@ -384,8 +449,57 @@ mod tests {
     }
 
     #[test]
+    fn entry_reads_are_bounded_regardless_of_the_zip_header() {
+        use std::io::{Cursor, Write};
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file(MANIFEST_NAME, stored).unwrap();
+        zip.write_all(&[b' '; 64]).unwrap();
+        let mut archive = zip::ZipArchive::new(zip.finish().unwrap()).unwrap();
+
+        assert_eq!(
+            read_bounded_entry(&mut archive, MANIFEST_NAME, 64)
+                .unwrap()
+                .len(),
+            64
+        );
+        // A blob read stops just past its signed size and lets the caller report it.
+        assert_eq!(
+            read_whole_entry(&mut archive, MANIFEST_NAME, 10)
+                .unwrap()
+                .len(),
+            11
+        );
+        let err = read_bounded_entry(&mut archive, MANIFEST_NAME, 63)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exceeds 63 bytes"), "{err}");
+    }
+
+    #[test]
+    fn present_oversized_signature_is_not_treated_as_missing() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized-signature.tpk");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file(MANIFEST_NAME, stored).unwrap();
+        zip.write_all(b"{}").unwrap();
+        zip.start_file(MANIFEST_SIG_NAME, stored).unwrap();
+        zip.write_all(&vec![b'x'; MAX_SIGNATURE_BYTES as usize + 1])
+            .unwrap();
+        zip.finish().unwrap();
+
+        let err = UnverifiedPack::open(&path).unwrap_err().to_string();
+        assert!(err.contains("exceeds 65536 bytes"), "{err}");
+    }
+
+    #[test]
     fn zstd_decode_rejects_garbage() {
-        assert!(decode_zstd(b"not a zstd frame at all", 1024).is_err());
+        assert!(decode_zstd(b"not a zstd frame at all", 1024, u64::MAX).is_err());
     }
 
     #[test]
@@ -394,9 +508,29 @@ mod tests {
         // rather than return truncated content.
         let payload = vec![7u8; 4096];
         let frame = zstd_frame(&payload);
-        assert_eq!(decode_zstd(&frame, 4096).unwrap(), payload);
-        let err = decode_zstd(&frame, 100).unwrap_err().to_string();
+        assert_eq!(decode_zstd(&frame, 4096, u64::MAX).unwrap(), payload);
+        let err = decode_zstd(&frame, 100, u64::MAX).unwrap_err().to_string();
         assert!(err.contains("expands past"), "{err}");
+    }
+
+    #[test]
+    fn zstd_decode_names_the_ceiling_it_hit() {
+        let frame = zstd_frame(&[7u8; 4096]);
+        // Caller budget below the declared size: the budget is to blame.
+        let Err(FormatError::Spec(err)) = decode_zstd(&frame, 4096, 100) else {
+            panic!("over budget must be a spec error");
+        };
+        assert!(
+            err.starts_with("decode budget of 100 bytes exceeded: "),
+            "{err}"
+        );
+        // Stream longer than its declared size, budget unlimited: the blob is.
+        let err = decode_zstd(&frame, 100, u64::MAX).unwrap_err().to_string();
+        assert!(!err.contains("decode budget"), "{err}");
+        assert!(err.contains("declared 100 byte limit"), "{err}");
+        // Both ceilings exceeded, declared one lower: still the blob's fault.
+        let err = decode_zstd(&frame, 100, 200).unwrap_err().to_string();
+        assert!(!err.contains("decode budget"), "{err}");
     }
 
     /// Build a real zstd frame without pulling in an encoder: store a single

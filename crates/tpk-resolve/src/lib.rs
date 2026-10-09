@@ -5,7 +5,7 @@
 //! reconstructed when their layer is staged, not here — see
 //! [`resolve::MaterializedSource`].
 //!
-//! See `spec/tpk-v1.md` section 6, and Appendix A for where it was revised.
+//! See `spec/tpk-v1.md` section 6.
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
 

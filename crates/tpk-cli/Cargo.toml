@@ -20,6 +20,13 @@ serde_json.workspace = true
 sha2.workspace = true
 semver.workspace = true
 
+[features]
+default = []
+# See tpk-format for what these mean. With `app-store` on, `tpk pack --kind`
+# no longer accepts `dlc` or `mod`.
+app-store = ["tpk-format/app-store"]
+__all = ["tpk-format/__all"]
+
 [dev-dependencies]
 tempfile.workspace = true
 zip.workspace = true

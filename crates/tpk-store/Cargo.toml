@@ -23,6 +23,11 @@ thiserror.workspace = true
 default = []
 # Dev-only: lets the state-machine tests build real signed packs.
 test-packs = ["tpk-format/pack", "tpk-delta/encode"]
+# See tpk-format for what these mean.
+app-store = ["tpk-format/app-store", "tpk-resolve/app-store"]
+__all = ["tpk-format/__all", "tpk-resolve/__all"]
 
 [dev-dependencies]
 tempfile.workspace = true
+# Only for the state.json / store-state.schema.json parity test.
+jsonschema.workspace = true

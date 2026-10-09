@@ -5,11 +5,19 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tpk_format::error::ErrorCode;
 use tpk_format::manifest::{PackId, PackKind, Sha256Hex};
 use tpk_format::pack::PackBuilder;
 use tpk_format::secret::SecretKey;
 use tpk_format::sign::{sha256_hex, TrustStore, TrustedKey};
 use tpk_resolve::{IndexBuilder, LayerSpec, MaterializedSource, ResolveMiss, Resolver};
+
+/// The kind that stacks above `patch`. An App Store build has none, so cases
+/// that only need "some other layer" fall back to a second base.
+#[cfg(not(app_store))]
+const ADDON_KIND: PackKind = PackKind::Dlc;
+#[cfg(app_store)]
+const ADDON_KIND: PackKind = PackKind::Base;
 
 /// What a test layer should contain.
 enum Content<'a> {
@@ -216,6 +224,7 @@ fn patches_apply_in_stack_order() {
 }
 
 #[test]
+#[cfg(not(app_store))]
 fn a_dlc_stacks_above_patches() {
     let mut w = World::new();
     w.layer(
@@ -270,7 +279,7 @@ fn a_delta_is_served_from_the_materialized_cache() {
 }
 
 #[test]
-fn an_unmaterialized_delta_marks_the_layer_corrupt() {
+fn an_unmaterialized_delta_is_reported_as_not_materialized() {
     let result = b"never materialized".repeat(10);
     let mut w = World::new();
     w.layer(
@@ -296,12 +305,12 @@ fn an_unmaterialized_delta_marks_the_layer_corrupt() {
     let r = w.resolver();
     assert!(matches!(
         r.get("/big.bin").unwrap_err(),
-        ResolveMiss::LayerCorrupt { .. }
+        ResolveMiss::NotMaterialized { .. }
     ));
 }
 
 #[test]
-fn a_materialized_result_with_the_wrong_hash_is_refused() {
+fn a_materialized_result_with_the_wrong_hash_is_reported_as_not_materialized() {
     let result = b"the expected result".repeat(10);
     let mut w = World::new();
     w.layer(
@@ -334,7 +343,7 @@ fn a_materialized_result_with_the_wrong_hash_is_refused() {
     let r = w.resolver_with(32 * 1024 * 1024, Box::new(Liar), false);
     assert!(matches!(
         r.get("/big.bin").unwrap_err(),
-        ResolveMiss::LayerCorrupt { .. }
+        ResolveMiss::NotMaterialized { .. }
     ));
 }
 
@@ -364,6 +373,7 @@ fn a_layer_whose_file_hash_moved_is_skipped() {
     let r = w.resolver();
     assert_eq!(r.failed_layers().len(), 1);
     assert!(r.failed_layers()[0].reason.contains("file hash"));
+    assert_eq!(r.failed_layers()[0].code, ErrorCode::Hash);
     // The stack degrades to the layers that are still intact.
     assert_eq!(get(&r, "/a.js"), b"good");
 }
@@ -382,7 +392,7 @@ fn a_layer_signed_by_a_stranger_is_skipped() {
     let stranger = SecretKey::generate();
     let path = w.dir.path().join("rogue.tpk");
     let mut b = PackBuilder::new(
-        PackKind::Dlc,
+        ADDON_KIND,
         PackId::parse("rogue").unwrap(),
         "1.0.0".parse().unwrap(),
         1,
@@ -397,6 +407,7 @@ fn a_layer_signed_by_a_stranger_is_skipped() {
 
     let r = w.resolver();
     assert_eq!(r.failed_layers().len(), 1);
+    assert_eq!(r.failed_layers()[0].code, ErrorCode::Signature);
     assert_eq!(get(&r, "/a.js"), b"trusted");
 }
 
@@ -416,10 +427,12 @@ fn a_missing_layer_file_is_skipped() {
 
     let r = w.resolver();
     assert_eq!(r.failed_layers().len(), 1);
+    assert_eq!(r.failed_layers()[0].code, ErrorCode::Io);
     assert_eq!(get(&r, "/a.js"), b"present");
 }
 
 #[test]
+#[cfg(not(app_store))]
 fn mod_layers_are_skipped_unless_explicitly_enabled() {
     let mut w = World::new();
     w.layer(
@@ -438,6 +451,7 @@ fn mod_layers_are_skipped_unless_explicitly_enabled() {
     // Default: the mod does not load at all.
     let r = w.resolver();
     assert_eq!(r.failed_layers().len(), 1);
+    assert_eq!(r.failed_layers()[0].code, ErrorCode::Disabled);
     assert_eq!(get(&r, "/index.html"), b"the real page");
 
     // Explicitly enabled, it wins — which is exactly why it is off by default.

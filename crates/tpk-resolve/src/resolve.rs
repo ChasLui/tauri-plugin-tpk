@@ -3,7 +3,10 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tpk_format::container::{UnverifiedPack, VerifiedPack};
-use tpk_format::manifest::{Op, PackKind, Sha256Hex};
+use tpk_format::error::ErrorCode;
+#[cfg(not(app_store))]
+use tpk_format::manifest::PackKind;
+use tpk_format::manifest::{Op, Sha256Hex};
 use tpk_format::sign::{sha256_hex, TrustStore};
 
 use crate::cache::ByteLru;
@@ -46,12 +49,23 @@ pub enum ResolveMiss {
         /// What went wrong.
         reason: String,
     },
+    /// A delta result is missing from the materialization cache, or the cached
+    /// copy does not match. The OS may purge that cache at any time, so this is
+    /// ordinary: fall back to the embedded assets until it is rebuilt, and do
+    /// not blacklist the layer.
+    NotMaterialized {
+        /// SHA-256 of the pack file whose delta result is missing.
+        file_sha256: Sha256Hex,
+    },
 }
 
 /// Builds an [`Index`] from a stack of layers, lowest first.
 pub struct IndexBuilder {
     trust: Arc<TrustStore>,
     min_key_epoch: u32,
+    // Kept in an App Store build so the builder keeps its shape; there is no
+    // mod kind left for it to gate.
+    #[cfg_attr(app_store, allow(dead_code))]
     allow_mods: bool,
     index: Index,
     readers: Vec<Mutex<VerifiedPack>>,
@@ -97,50 +111,44 @@ impl IndexBuilder {
                         path: spec.path.clone(),
                         file_sha256: Some(spec.file_sha256),
                         reason: "layer stack is full".to_string(),
+                        code: ErrorCode::State,
                     });
                 }
             }
-            Err(reason) => self.failed.push(FailedLayer {
+            Err((code, reason)) => self.failed.push(FailedLayer {
                 path: spec.path.clone(),
                 file_sha256: Some(spec.file_sha256),
                 reason,
+                code,
             }),
         }
     }
 
-    fn load(&self, spec: &LayerSpec) -> Result<(Layer, VerifiedPack), String> {
-        let bytes = std::fs::read(&spec.path).map_err(|e| e.to_string())?;
+    fn load(&self, spec: &LayerSpec) -> Result<(Layer, VerifiedPack), (ErrorCode, String)> {
+        let bytes = std::fs::read(&spec.path).map_err(|e| (ErrorCode::Io, e.to_string()))?;
         let actual = sha256_hex(&bytes);
         if actual != spec.file_sha256 {
-            return Err(format!(
-                "file hash {actual} does not match the recorded {}",
-                spec.file_sha256
+            return Err((
+                ErrorCode::Hash,
+                format!(
+                    "file hash {actual} does not match the recorded {}",
+                    spec.file_sha256
+                ),
             ));
         }
         drop(bytes);
 
-        let unverified = UnverifiedPack::open(&spec.path).map_err(|e| e.to_string())?;
-        // A pack's signature is checked against whichever epoch still verifies,
-        // bounded below by the client's monotonic floor.
-        let mut last = String::from("no trusted key");
-        let mut verified = None;
-        for epoch in self.min_key_epoch..=self.trust.max_epoch().max(self.min_key_epoch) {
-            match UnverifiedPack::open(&spec.path)
-                .map_err(|e| e.to_string())?
-                .verify(&self.trust, None, epoch, self.min_key_epoch)
-            {
-                Ok(pack) => {
-                    verified = Some(pack);
-                    break;
-                }
-                Err(e) => last = e.to_string(),
-            }
-        }
-        drop(unverified);
-        let pack = verified.ok_or(last)?;
+        // A pack's signature is checked against any key at or above the
+        // client's monotonic floor.
+        let pack = UnverifiedPack::open(&spec.path)
+            .and_then(|p| p.verify(&self.trust, None, self.min_key_epoch))
+            .map_err(|e| (e.code(), e.to_string()))?;
 
+        // In an App Store build there is no mod kind to refuse; `allow_mods`
+        // stays, because nothing can set it to a pack that exists.
+        #[cfg(not(app_store))]
         if pack.manifest().kind == PackKind::Mod && !self.allow_mods {
-            return Err("mod layers are disabled".to_string());
+            return Err((ErrorCode::Disabled, "mod layers are disabled".to_string()));
         }
 
         Ok((
@@ -219,8 +227,10 @@ impl Resolver {
     ///
     /// Returns [`ResolveMiss::Deleted`] for a tombstone — the caller must not
     /// fall back to embedded assets in that case, or deletions would never take
-    /// effect — and [`ResolveMiss::LayerCorrupt`] when a layer must be
-    /// blacklisted.
+    /// effect — [`ResolveMiss::LayerCorrupt`] when a layer must be blacklisted,
+    /// and [`ResolveMiss::NotMaterialized`] when a delta result has to be
+    /// rebuilt. Only successes are cached, so a result that appears later is
+    /// served by the same resolver.
     pub fn get(&self, path: &str) -> Result<Arc<[u8]>, ResolveMiss> {
         let Some(loc) = self.index.lookup(path) else {
             return Err(ResolveMiss::NotFound);
@@ -257,9 +267,9 @@ impl Resolver {
             }
             Op::Delta => {
                 // Already reconstructed at stage time; this is a cache read.
-                self.materialized.get(&expected).ok_or_else(|| {
-                    self.corrupt(loc.layer, "delta result has not been materialized")
-                })?
+                self.materialized
+                    .get(&expected)
+                    .ok_or_else(|| self.not_materialized(loc.layer))?
             }
             Op::Delete => unreachable!("handled above"),
         };
@@ -269,6 +279,9 @@ impl Resolver {
         // Checking both keeps one rule rather than two.
         let actual = sha256_hex(&bytes);
         if actual != expected {
+            if entry.op == Op::Delta {
+                return Err(self.not_materialized(loc.layer));
+            }
             return Err(self.corrupt(
                 loc.layer,
                 &format!("content hash {actual} does not match {expected}"),
@@ -282,16 +295,24 @@ impl Resolver {
         Ok(bytes)
     }
 
-    fn corrupt(&self, layer: u16, reason: &str) -> ResolveMiss {
-        let file_sha256 = self
-            .index
+    fn layer_sha256(&self, layer: u16) -> Sha256Hex {
+        self.index
             .layers()
             .get(layer as usize)
             .map(|l| l.file_sha256)
-            .unwrap_or_else(|| sha256_hex(b""));
+            .unwrap_or_else(|| sha256_hex(b""))
+    }
+
+    fn corrupt(&self, layer: u16, reason: &str) -> ResolveMiss {
         ResolveMiss::LayerCorrupt {
-            file_sha256,
+            file_sha256: self.layer_sha256(layer),
             reason: reason.to_string(),
+        }
+    }
+
+    fn not_materialized(&self, layer: u16) -> ResolveMiss {
+        ResolveMiss::NotMaterialized {
+            file_sha256: self.layer_sha256(layer),
         }
     }
 

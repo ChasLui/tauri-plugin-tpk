@@ -60,7 +60,10 @@ resolver is in place before anything can request an asset.
 
 Inside `setup`, in order:
 
-1. Read `plugins.tpk`. Absent or unusable → log and stay inert.
+1. Take the config: `init_with_config`'s, else `plugins.tpk`. Absent (including
+   a misspelled section name) → log and stay inert. A present section that fails
+   to deserialize never gets here: Tauri parses it before `setup`, so
+   `Builder::build` returns an error and the app does not start.
 2. Build the `TrustStore` from `pubkeys`.
 3. Resolve the two disk roots and ask the platform to exclude the layer pool
    from backup.
@@ -69,7 +72,12 @@ Inside `setup`, in order:
 6. `Store::boot()` — run the state machine (below).
 7. Build the resolver over the resulting layer set and install it into
    `PackAssets`.
-8. Record any layer that failed to load, and `manage` the plugin state.
+8. Record any layer that failed to load, striking it in the blacklist under
+   the reason its error code maps to (`E_IO` and `E_HASH` are transient). No
+   strike for `E_SIGNATURE` — pool layers were verified when staged and the
+   hash is checked first, so this means the trusted keys or the key floor
+   moved — nor for a mod layer refused or a full layer stack. Then `manage`
+   the plugin state.
 
 `setup` **never returns `Err`**. Returning `Err` there aborts `Builder::build`
 and the app does not start — so a corrupt `state.json` or a full disk logs and
@@ -145,9 +153,15 @@ increments `boot_attempts`, which after three launches blacklists a pack that
 was never broken. Materialization at download time costs nothing anyone is
 waiting on.
 
-The results land in the cache root, which the OS may purge at any time, so the
-lazy re-materialization path in `tpk-store::materialize` must always exist. See
+The results land in the cache root, which the OS may purge at any time. When
+`setup` finds results missing, a background thread rebuilds them with
+`tpk_store::materialize_stack`; until it finishes, those paths fall back to the
+embedded assets, and a miss is never counted against the layer. See
 [Disk layout](./disk-layout.md).
+
+Known gap: CSP script hashes are computed once, on the first HTML request. A
+script whose result is still missing at that moment gets no hash for the rest of
+the process; Tauri also injects `'self'`, so the script is not blocked.
 
 ## Further reading
 

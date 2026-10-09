@@ -25,6 +25,16 @@ thiserror.workspace = true
 default = []
 # Writing packs (CLI only): pulls in the C-backed zstd encoder and signing.
 pack = ["dep:zstd", "dep:ed25519-compact", "dep:blake2"]
+# App Store builds: `PackKind::{Dlc, Mod}` stop existing as variants, so no
+# code path can accept a dlc or a mod. Spec section 11.1 item 1 and section 19.
+# Off is the historical behaviour; nothing else changes.
+app-store = []
+# Internal, never enable by hand. `--all-features` would otherwise turn
+# `app-store` on for every CI job and delete variants the rest of the suite
+# needs, so every gate is spelled
+# `all(feature = "app-store", not(feature = "__all"))` — `--all-features`
+# enables both and lands back on the default behaviour.
+__all = []
 
 [dependencies.zstd]
 version = "0.14"

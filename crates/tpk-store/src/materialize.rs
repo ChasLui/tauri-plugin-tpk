@@ -15,16 +15,17 @@
 //! corruption.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tpk_format::container::UnverifiedPack;
 use tpk_format::manifest::{Op, Sha256Hex};
 use tpk_format::sign::{sha256_hex, TrustStore};
-use tpk_resolve::{IndexBuilder, LayerSpec, MaterializedSource, NoMaterialized};
+use tpk_resolve::{IndexBuilder, LayerSpec, MaterializedSource, NoMaterialized, Resolver};
 
 use crate::error::{Result, StoreError};
-use crate::state::atomic_write;
+use crate::state::atomic_write_content_addressed;
 
 /// Ceiling on a single reconstructed asset.
 ///
@@ -58,11 +59,17 @@ impl MaterializedDir {
 
 impl MaterializedSource for MaterializedDir {
     fn get(&self, sha256: &Sha256Hex) -> Option<Vec<u8>> {
-        let bytes = std::fs::read(self.dir.join(sha256.to_hex())).ok()?;
+        let path = self.dir.join(sha256.to_hex());
+        let mut file = std::fs::File::open(&path).ok()?.take(MAX_ASSET_BYTES + 1);
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).ok()?;
         // The cache directory is not a trust boundary — the OS, a backup tool
         // or a user can touch it — so what comes back is checked like anything
-        // else.
-        (sha256_hex(&bytes) == *sha256).then_some(bytes)
+        // else. Readers leave bad copies alone; a writer replaces them atomically.
+        if bytes.len() as u64 > MAX_ASSET_BYTES || sha256_hex(&bytes) != *sha256 {
+            return None;
+        }
+        Some(bytes)
     }
 }
 
@@ -80,13 +87,16 @@ pub fn materialize_layer(
     min_key_epoch: u32,
     out_dir: &Path,
 ) -> Result<usize> {
-    let mut pack =
-        UnverifiedPack::open(&layer.path)?.verify(trust, None, min_key_epoch, min_key_epoch)?;
+    let mut pack = UnverifiedPack::open(&layer.path)?.verify(trust, None, min_key_epoch)?;
+    let materialized = MaterializedDir::new(out_dir.to_path_buf());
+    // Only entries whose result is absent; when there are none, skip opening
+    // and verifying every pack beneath.
     let deltas: Vec<_> = pack
         .manifest()
         .entries
         .iter()
         .filter(|e| e.op == Op::Delta)
+        .filter(|e| e.sha256.is_none_or(|sha| materialized.get(&sha).is_none()))
         .cloned()
         .collect();
     if deltas.is_empty() {
@@ -113,7 +123,7 @@ pub fn materialize_layer(
             .sha256
             .ok_or_else(|| StoreError::Delta(format!("{} has no sha256", entry.path)))?;
         let out_path = out_dir.join(expected.to_hex());
-        if out_path.exists() {
+        if materialized.get(&expected).is_some() {
             continue;
         }
 
@@ -157,10 +167,47 @@ pub fn materialize_layer(
                 entry.path
             )));
         }
-        atomic_write(&out_path, &result)?;
+        atomic_write_content_addressed(&out_path, &result)?;
         written += 1;
     }
     Ok(written)
+}
+
+/// Materialize a whole stack, lowest layer first, each against the layers before it.
+///
+/// Used to rebuild results after the OS purged the cache. Layers whose results
+/// are all present cost one pack verification each.
+///
+/// # Errors
+///
+/// Stops at the first layer [`materialize_layer`] fails on.
+pub fn materialize_stack(
+    specs: &[LayerSpec],
+    trust: &Arc<TrustStore>,
+    min_key_epoch: u32,
+    out_dir: &Path,
+) -> Result<usize> {
+    let mut written = 0;
+    for (i, spec) in specs.iter().enumerate() {
+        written += materialize_layer(spec, &specs[..i], trust, min_key_epoch, out_dir)?;
+    }
+    Ok(written)
+}
+
+/// Whether any delta entry in the resolver's layers lacks a valid result in `dir`.
+///
+/// Checks content hashes and stops at the first missing or corrupt result. The
+/// plugin calls this on its background repair thread, away from window startup.
+pub fn missing_materialized(resolver: &Resolver, dir: &Path) -> bool {
+    let materialized = MaterializedDir::new(dir.to_path_buf());
+    resolver
+        .index()
+        .layers()
+        .iter()
+        .flat_map(|layer| layer.manifest.entries.iter())
+        .filter(|e| e.op == Op::Delta)
+        .filter_map(|e| e.sha256)
+        .any(|sha| materialized.get(&sha).is_none())
 }
 
 /// Cache of materialized results held in memory, for tests.
@@ -221,9 +268,28 @@ mod tests {
     #[test]
     fn a_tampered_result_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let sha = sha256_hex(b"the real content");
-        std::fs::write(dir.path().join(sha.to_hex()), b"something else").unwrap();
+        let content = b"the real content";
+        let sha = sha256_hex(content);
+        let path = dir.path().join(sha.to_hex());
+        std::fs::write(&path, b"something else").unwrap();
+        let source = MaterializedDir::new(dir.path());
+        assert!(source.get(&sha).is_none());
+        assert_eq!(std::fs::read(&path).unwrap().as_slice(), b"something else");
+        atomic_write_content_addressed(&path, content).unwrap();
+        assert_eq!(source.get(&sha).unwrap().as_slice(), content);
+    }
+
+    #[test]
+    fn an_oversized_sparse_result_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let sha = sha256_hex(b"small result");
+        let path = dir.path().join(sha.to_hex());
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_ASSET_BYTES + 1)
+            .unwrap();
         assert!(MaterializedDir::new(dir.path()).get(&sha).is_none());
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), MAX_ASSET_BYTES + 1);
     }
 
     #[test]

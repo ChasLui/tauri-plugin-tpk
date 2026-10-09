@@ -72,12 +72,6 @@ export default defineConfig({
             { label: 'Local Testing', slug: 'local-testing' },
           ],
         },
-        {
-          label: 'Migrating',
-          items: [
-            { label: 'From tauri-plugin-hotswap', slug: 'migrating-from-hotswap' },
-          ],
-        },
       ],
     }),
   ],

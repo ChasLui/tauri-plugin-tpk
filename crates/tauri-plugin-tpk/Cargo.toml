@@ -19,12 +19,30 @@ links = "tauri-plugin-tpk"
 name = "tauri_plugin_tpk"
 path = "src/lib.rs"
 
+[features]
+default = []
+# See tpk-format for what these mean. Forwarded to every crate that matches on
+# `PackKind`, so `--features app-store` on this crate reaches all of them.
+app-store = [
+  "tpk-format/app-store",
+  "tpk-resolve/app-store",
+  "tpk-store/app-store",
+  "tpk-client/app-store",
+]
+__all = [
+  "tpk-format/__all",
+  "tpk-resolve/__all",
+  "tpk-store/__all",
+  "tpk-client/__all",
+]
+
 [dependencies]
 tpk-format.workspace = true
 tpk-resolve.workspace = true
 tpk-store.workspace = true
 tpk-client.workspace = true
 tpk-delta.workspace = true
+tpk-backup.workspace = true
 tauri-utils = "2"
 serde.workspace = true
 serde_json.workspace = true

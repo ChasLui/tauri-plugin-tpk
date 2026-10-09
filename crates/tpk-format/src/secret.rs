@@ -284,6 +284,41 @@ mod tests {
     }
 
     #[test]
+    fn packs_accept_any_key_at_or_above_the_floor() {
+        let k1 = SecretKey::parse(&make_key([11u8; 32])).unwrap();
+        let k2 = SecretKey::parse(&make_key([22u8; 32])).unwrap();
+        let trust = TrustStore::new(&[
+            TrustedKey {
+                key: k1.public_key_base64(),
+                epoch: 1,
+            },
+            TrustedKey {
+                key: k2.public_key_base64(),
+                epoch: 2,
+            },
+        ])
+        .unwrap();
+
+        let sig1 = k1.sign(b"payload", "timestamp:0", "c");
+        let sig2 = k2.sign(b"payload", "timestamp:0", "c");
+
+        // Mid-rotation: the floor is still 1, a pack signed by the new key loads,
+        // and each signature reports the epoch of the key that verified it.
+        assert_eq!(trust.verify_at_or_above(b"payload", &sig1, 1).unwrap(), 1);
+        assert_eq!(trust.verify_at_or_above(b"payload", &sig2, 1).unwrap(), 2);
+
+        // Once the floor moves to 2, the retired key is never tried.
+        assert_eq!(trust.verify_at_or_above(b"payload", &sig2, 2).unwrap(), 2);
+        assert!(trust.verify_at_or_above(b"payload", &sig1, 2).is_err());
+
+        let err = trust
+            .verify_at_or_above(b"payload", &sig2, 3)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no trusted key at or above epoch 3"), "{err}");
+    }
+
+    #[test]
     fn accepts_a_bare_base64_body() {
         let full = make_key([5u8; 32]);
         let bare = full.lines().nth(1).unwrap();

@@ -21,6 +21,7 @@ tpk-delta = { path = "crates/tpk-delta", version = "=0.1.0" }
 tpk-resolve = { path = "crates/tpk-resolve", version = "=0.1.0" }
 tpk-store = { path = "crates/tpk-store", version = "=0.1.0" }
 tpk-client = { path = "crates/tpk-client", version = "=0.1.0" }
+tpk-backup = { path = "crates/tpk-backup", version = "=0.1.0" }
 
 # third-party
 serde = { version = "1.0", features = ["derive"] }

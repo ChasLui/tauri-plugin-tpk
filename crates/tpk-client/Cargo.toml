@@ -24,6 +24,9 @@ thiserror.workspace = true
 default = []
 # Dev-only: lets the channel tests sign manifests.
 test-keys = ["tpk-format/pack"]
+# See tpk-format for what these mean.
+app-store = ["tpk-format/app-store"]
+__all = ["tpk-format/__all"]
 
 [dev-dependencies]
 tempfile.workspace = true

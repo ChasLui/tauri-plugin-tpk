@@ -40,7 +40,9 @@ fn kind_name(kind: PackKind) -> &'static str {
     match kind {
         PackKind::Base => "base",
         PackKind::Patch => "patch",
+        #[cfg(not(app_store))]
         PackKind::Dlc => "dlc",
+        #[cfg(not(app_store))]
         PackKind::Mod => "mod",
     }
 }
@@ -164,6 +166,12 @@ pub struct Status {
     pub degraded: bool,
     /// Layers that failed to load this launch, by hash.
     pub failed_layers: Vec<String>,
+    /// The revision rolled back during this launch, if any.
+    ///
+    /// Reported here rather than as a `tpk://state` event: the rollback happens
+    /// in setup, before any webview exists to receive one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rolled_back: Option<String>,
     /// Capabilities granted to the main window that let overlay JavaScript
     /// reach native functionality. Empty is what you want.
     pub unsafe_capabilities: Vec<String>,
@@ -286,6 +294,7 @@ mod tests {
             pending: false,
             degraded: false,
             failed_layers: vec![],
+            rolled_back: Some("rev-6".into()),
             unsafe_capabilities: vec!["shell:allow-execute".into()],
             has_embedded_fallback: true,
             last_error: None,
@@ -294,5 +303,15 @@ mod tests {
         assert_eq!(json["pointer"], "booting");
         assert_eq!(json["unsafe_capabilities"][0], "shell:allow-execute");
         assert_eq!(json["has_embedded_fallback"], true);
+        assert_eq!(json["rolled_back"], "rev-6");
+        let quiet = Status {
+            rolled_back: None,
+            ..status
+        };
+        let json = serde_json::to_value(&quiet).unwrap();
+        assert!(
+            json.get("rolled_back").is_none(),
+            "omitted when nothing rolled back"
+        );
     }
 }
