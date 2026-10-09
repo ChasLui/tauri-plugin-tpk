@@ -53,11 +53,6 @@ impl Layout {
         self.data_root.join("blacklist.json")
     }
 
-    /// `keys-cache.json`, the audit trail for key epochs.
-    pub fn keys_cache_file(&self) -> PathBuf {
-        self.data_root.join("keys-cache.json")
-    }
-
     /// The content-addressed layer pool.
     pub fn layers_dir(&self) -> PathBuf {
         self.data_root.join("layers")

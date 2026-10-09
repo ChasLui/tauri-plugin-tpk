@@ -17,7 +17,7 @@ flow.
 
 | Code | Cause | What to do |
 |---|---|---|
-| `E_DISABLED` | The plugin is off by configuration | Nothing. Expected |
+| `E_DISABLED` | The plugin is off: disabled by configuration, or its `setup` degraded. `status()` / `reset()` / `set_mod_enabled` reject with it | Nothing if disabled on purpose; otherwise read the `[tpk]` setup log |
 | `E_NETWORK` | Transport failure reaching the manifest or a pack | Retry later. Common and usually not your bug |
 | `E_SIGNATURE` | No trusted key verified the signature | Stop. Either the key rotated without a shell release, or the content is not yours |
 | `E_HASH` | Content did not match its declared digest | Stop. Corrupt CDN object or a truncated transfer |
@@ -30,7 +30,7 @@ flow.
 | `E_IO` | Filesystem failure | Disk full, permissions, or a purged cache |
 | `E_DELTA` | A delta could not be applied | The base resolved to something other than `delta_base_sha256` |
 | `E_STATE` | On-disk state is missing or inconsistent | The plugin degrades to embedded assets. Report it |
-| `E_POLICY` | A policy was violated | Non-default override globs, or a pack kind unavailable on this platform |
+| `E_POLICY` | A policy was violated | Non-default override globs, or a `mod` manifest not declaring `trusted = false` |
 
 ## Notes on the ones that surprise people
 
@@ -54,6 +54,16 @@ Rebuilding the same `version_code` with different content does not get past it �
 which is deliberate, because otherwise a CI rerun could push a condemned release
 back onto devices that already rejected it. Bump `version_code`.
 
+### `E_PARENT` at stage
+
+A patch is refused if the layer directly beneath it with the same id does not
+match its parent link on **both** `version_code` and `manifest_sha256`, or if
+there is no such layer at all. The message distinguishes the two reasons a
+parent can be absent — never installed, versus installed but blacklisted —
+because they look identical to the merge and mean very different things to
+whoever is reading the log. Neither case writes to the blacklist: the patch is
+fine, this device just cannot apply it.
+
 ### `E_DELTA`
 
 A patch declares the digest the layers below it must resolve to. If they resolve
@@ -61,10 +71,24 @@ to something else the patch fails rather than producing plausible garbage.
 Usually it means the patch was built against a different parent than the one
 installed — check `parent_version_code`.
 
-### `E_POLICY` for `dlc` / `mod` on mobile
+### `E_POLICY`
 
-Not a bug. Those kinds do not compile for App Store targets; the reasons are in
-[Security](./security.md#platform-availability).
+Raised when a manifest is parsed: `can_override` / `cannot_override` are not at
+their defaults (nothing enforces them yet, so they are rejected rather than
+ignored), or a `mod` pack does not declare `trusted = false`.
+
+A build compiled with `--features app-store` also raises it for a pack manifest
+declaring `kind: dlc` or `kind: mod`: those variants do not exist there, so
+serde would otherwise report a shape complaint for what is really a distribution
+policy decision. Channel entries of those kinds are dropped instead of raising
+anything (see [Overlay resolution](./overlay.md#pack-kinds)). Without the
+feature there is no per-platform kind check and `dlc` is accepted everywhere;
+keeping it off App Store builds is then up to what you publish (see
+[Security](./security.md#platform-availability)).
+
+A channel never delivers `mod` (skipped as `ModOverChannel`), mod layers are
+never loaded, and `set_mod_enabled` refuses with `E_SPEC` (or `E_DISABLED` when
+the plugin is off).
 
 ## Outcomes that are not errors
 

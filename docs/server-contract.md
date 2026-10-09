@@ -54,7 +54,7 @@ whole point.
 | `key_epoch` | | Signing key generation. Default `1` |
 | `min_shell` | | Lowest shell version any pack supports |
 | `force_shell` | | Below this, no pack is applied at all |
-| `notes` | | Truncated to 200 characters on parse |
+| `notes` | | On parse: markup stripped, text-hiding and text-reordering characters dropped, then truncated to 200 visible characters. See [`check()`](./api-reference.md#check) |
 | `packs` | ✅ | What is on offer |
 
 ### `packs[]`
@@ -71,6 +71,8 @@ whole point.
 | `sha256` | ✅ | Digest of the `.tpk` file, lowercase hex |
 | `optional` | | Clients may skip it. Default `false` |
 | `rollout` | | 1..=100. Default `100` |
+| `min_shell` | | Lowest shell the pack supports, copied from its signed manifest by `tpk channel` |
+| `max_shell` | | Highest shell the pack supports, copied the same way |
 
 `(id, version_code)` must be unique within a manifest.
 
@@ -116,8 +118,15 @@ buys you.
 
 ## Shell gating
 
-`min_shell` is advisory per pack; the client skips packs the running shell is
-too old for and reports `shell_required` if nothing is left.
+The channel-level `min_shell` is a hard gate: below it, `check()` reports
+`shell_required` and nothing is applied. `tpk channel` defaults it to the
+highest `min_shell` among the packs.
+
+A pack's own `min_shell` / `max_shell` (bounds inclusive) is skipped over, not
+reported: the client leaves out packs the running shell is outside of, and
+`check()` returns `up_to_date` if nothing is left. Staging checks the signed
+manifest's range again, so a channel entry without it still cannot install;
+that `download()` fails with `E_SHELL` and blacklists nothing.
 
 `force_shell` is a blunt instrument: below it, **no** pack is applied, including
 hotfixes for the version you are trying to retire. Use it when the shell should

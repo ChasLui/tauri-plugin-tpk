@@ -26,7 +26,7 @@ pub struct ProgressPayload {
 /// Payload of [`STATE`].
 #[derive(Debug, Clone, Serialize)]
 pub struct StatePayload {
-    /// What happened: `staged`, `committed`, `rolled_back` or `reset`.
+    /// What happened: `staged`, `committed` or `reset`.
     pub pointer: String,
     /// The revision involved, if any.
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -54,7 +54,7 @@ fn a_pack_published_at_v0_1_0_still_verifies() {
 
     let pack = UnverifiedPack::open(&path)
         .expect("the golden pack must still parse")
-        .verify(&trust(), None, 1, 1)
+        .verify(&trust(), None, 1)
         .expect(
             "the golden pack must still verify: a failure here means every \
                  already-published pack has become unverifiable",
@@ -95,9 +95,7 @@ fn the_golden_pack_is_refused_by_an_untrusted_key() {
     let path = dir.path().join("golden.tpk");
     std::fs::write(&path, GOLDEN).unwrap();
 
-    let result = UnverifiedPack::open(&path)
-        .unwrap()
-        .verify(&other, None, 1, 1);
+    let result = UnverifiedPack::open(&path).unwrap().verify(&other, None, 1);
     assert!(
         result.is_err(),
         "a pack signed by a different key must not verify"
@@ -114,7 +112,7 @@ fn the_golden_pack_is_refused_below_its_key_epoch() {
     // must refuse it.
     let result = UnverifiedPack::open(&path)
         .unwrap()
-        .verify(&trust(), None, 1, 2);
+        .verify(&trust(), None, 2);
     assert!(result.is_err(), "a retired key epoch must be refused");
 }
 
@@ -129,6 +127,6 @@ fn tampering_with_one_byte_is_caught() {
     let path = dir.path().join("tampered.tpk");
     std::fs::write(&path, &tampered).unwrap();
 
-    let result = UnverifiedPack::open(&path).and_then(|p| p.verify(&trust(), None, 1, 1));
+    let result = UnverifiedPack::open(&path).and_then(|p| p.verify(&trust(), None, 1));
     assert!(result.is_err(), "a flipped byte must not verify");
 }

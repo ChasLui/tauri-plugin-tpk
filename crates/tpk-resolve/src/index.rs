@@ -118,6 +118,14 @@ mod tests {
         }
     }
 
+    /// The kind that stacks above `patch`. An App Store build has none, so the
+    /// "different layers" cases use a second base instead — still a different
+    /// layer, which is all those cases are about.
+    #[cfg(not(app_store))]
+    const ADDON_KIND: PackKind = PackKind::Dlc;
+    #[cfg(app_store)]
+    const ADDON_KIND: PackKind = PackKind::Base;
+
     fn layer(id: &str, kind: PackKind, version_code: u64, entries: Vec<Entry>) -> Layer {
         Layer {
             path: format!("/tmp/{id}-{version_code}.tpk").into(),
@@ -210,12 +218,7 @@ mod tests {
             1,
             vec![entry("/a.js", Op::Full), entry("/b.js", Op::Full)],
         ));
-        index.push(layer(
-            "maps",
-            PackKind::Dlc,
-            1,
-            vec![entry("/c.js", Op::Full)],
-        ));
+        index.push(layer("maps", ADDON_KIND, 1, vec![entry("/c.js", Op::Full)]));
 
         let mut visible: Vec<_> = index.visible_paths().collect();
         visible.sort_unstable();

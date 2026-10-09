@@ -92,6 +92,11 @@ export interface Status {
   /** Layers that failed to load this launch, by hash. */
   failed_layers: string[];
   /**
+   * The revision rolled back during this launch, if any. Not delivered as a
+   * {@link StateEvent}: the rollback happens before any window exists.
+   */
+  rolled_back?: string;
+  /**
    * Capabilities granted to this window that overlay JavaScript can reach.
    * Empty is what you want: pack content runs on the `tauri://` origin and
    * inherits whatever the window was granted.
@@ -112,7 +117,7 @@ export interface DownloadProgress {
 
 /** A state machine transition. */
 export interface StateEvent {
-  pointer: "staged" | "committed" | "rolled_back" | "reset";
+  pointer: "staged" | "committed" | "reset";
   rev?: string;
 }
 

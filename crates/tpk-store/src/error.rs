@@ -18,6 +18,15 @@ pub enum StoreError {
     #[error("delta materialization: {0}")]
     Delta(String),
 
+    /// An incoming pack's parent link does not describe the layer beneath it.
+    #[error("parent link: {0}")]
+    Parent(String),
+
+    /// A pack does not support the running shell. Not a fault in the pack: a
+    /// different shell could stage it, so this must never blacklist it.
+    #[error("shell: {0}")]
+    Shell(String),
+
     /// A pack is refused because it is blacklisted.
     #[error("blacklisted: {0}")]
     Blacklisted(String),
@@ -38,6 +47,8 @@ impl StoreError {
             Self::State(_) => ErrorCode::State,
             Self::Integrity(_) => ErrorCode::Hash,
             Self::Delta(_) => ErrorCode::Delta,
+            Self::Parent(_) => ErrorCode::Parent,
+            Self::Shell(_) => ErrorCode::Shell,
             Self::Blacklisted(_) => ErrorCode::Blacklist,
             Self::Io(_) => ErrorCode::Io,
             Self::Format(e) => e.code(),
@@ -57,6 +68,8 @@ mod tests {
         assert_eq!(StoreError::State("x".into()).code(), ErrorCode::State);
         assert_eq!(StoreError::Integrity("x".into()).code(), ErrorCode::Hash);
         assert_eq!(StoreError::Delta("x".into()).code(), ErrorCode::Delta);
+        assert_eq!(StoreError::Parent("x".into()).code(), ErrorCode::Parent);
+        assert_eq!(StoreError::Shell("x".into()).code(), ErrorCode::Shell);
         assert_eq!(
             StoreError::Blacklisted("x".into()).code(),
             ErrorCode::Blacklist

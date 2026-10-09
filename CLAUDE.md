@@ -11,9 +11,7 @@ bsdiff deltas and deletion tombstones, or optional DLC. A three-state pointer
 (staged → booting → committed) plus a blacklist guarantees a bad pack can never
 brick the app.
 
-The frozen contract lives in `spec/tpk-v1.md`. **Appendix A of that file overrides
-the body** — it records where the original spec conflicts with Tauri's real API,
-with App Store / Play policy, and with measured performance.
+The frozen contract lives in `spec/tpk-v1.md`.
 
 ## Repository Layout
 
@@ -25,6 +23,7 @@ crates/
   tpk-store/        # layer pool, three-state machine, blacklist, delta materialization
   tpk-client/       # channel manifest fetch, update planning, resumable download
   tpk-cli/          # `tpk` binary: pack / sign / verify / channel / inspect / audit
+  tpk-backup/       # one fn: NSURLIsExcludedFromBackupKey on Apple, no-op elsewhere
   tauri-plugin-tpk/ # attach/init, PackAssets, commands, events, permissions
 packages/tauri-plugin-tpk-api/   # TypeScript guest API (npm: tauri-plugin-tpk-api)
 examples/shell-app/              # standalone crate, NOT a workspace member
@@ -42,6 +41,11 @@ all of the above ◄── tauri-plugin-tpk
 `tpk-client` deliberately does not depend on `tpk-store` so that `Client::plan` stays
 a pure function and is testable without touching disk.
 
+`tpk-backup` is a leaf: it depends on no other `tpk-*` crate and only
+`tauri-plugin-tpk` consumes it. It exists so the one `unsafe` call the project needs
+(`NSURLIsExcludedFromBackupKey`, Apple only) lives outside the plugin's
+`#![forbid(unsafe_code)]`.
+
 ## Build & Test Commands
 
 ```bash
@@ -55,6 +59,17 @@ pnpm -C packages/tauri-plugin-tpk-api install --frozen-lockfile
 pnpm -C packages/tauri-plugin-tpk-api build
 ```
 
+```bash
+cargo check --workspace --all-targets --features app-store
+cargo clippy --workspace --all-targets --features app-store -- -D warnings
+cargo test -p tpk-format --features app-store
+```
+
+`--all-features` deliberately does **not** enable `app-store`: it would sweep up the
+internal `__all` feature too, and each crate's `build.rs` only emits `cfg(app_store)`
+when `app-store` is on and `__all` is off. The App Store configuration is therefore
+checked with an explicit `--features app-store` (CI has an `app-store` job).
+
 `examples/shell-app/src-tauri` is excluded from the workspace and carries its own
 lockfile, so `--workspace` never covers it — check it separately (CI has a job).
 
@@ -66,7 +81,7 @@ lockfile, so `--workspace` never covers it — check it separately (CI has a job
   the 14 frozen `E_*` codes; serialization is `{"code": "E_HASH", "message": "..."}`.
 - Prefer `pub(crate)` over `pub` for internal functions; all public items need docs.
 - Business outcomes go through return values, not `Err`: `check`/`download` return
-  `Ok(Outcome { status })` for up_to_date / shell_required / blacklisted / disabled.
+  `Ok(Outcome { status })` for up_to_date / shell_required / disabled / degraded / failed.
   Reserve `Err` for programming errors and unclassifiable IO.
 
 ## Workflow
@@ -93,21 +108,28 @@ lockfile, so `--workspace` never covers it — check it separately (CI has a job
   `Builder::build()`, before any window exists. `setup` must **never return `Err`** —
   that aborts `Builder::build` and the app fails to start; disk problems log and
   degrade to embedded assets instead.
-- **`PackAssets` uses `OnceLock`, not `RwLock`**: layers are frozen for the process
+- **`PackAssets` uses `OnceLock`, not `RwLock`**: the index is frozen for the process
   lifetime by design (spec §7), so a running WebView always sees a consistent index.
-- **Delta materialization happens in `stage()`, never in `boot()`**: doing it at boot
-  blocks window creation and can trip the iOS 20s launch watchdog / Android ANR,
-  which then interacts with the boot-attempt counter to blacklist a perfectly good pack.
+- **Delta materialization happens in `stage()`, never synchronously in `setup`/`boot()`**:
+  doing it at launch blocks window creation and can trip the iOS 20s launch watchdog /
+  Android ANR, which then interacts with the boot-attempt counter to blacklist a
+  perfectly good pack. If the OS purged `$APPCACHE/tpk/materialized/`, a background
+  thread spawned from `setup` rebuilds the results; until then those paths fall back
+  to embedded assets.
 - **Two disk roots**: `$APPLOCALDATA/tpk/` holds state and the layer pool (excluded
   from iCloud backup); `$APPCACHE/tpk/` holds materialized deltas and `.part` files,
-  which the OS may purge at any time — so the lazy materialization path must always exist.
+  which the OS may purge at any time — so the background rebuild in `setup` must always exist.
 - **`zip` must stay `default-features = false`**: its default feature set drags
   `zstd-sys` (C bindings), `bzip2`, `lzma-rust2` and `ppmd-rust` into the runtime.
   Runtime zstd decoding uses pure-Rust `ruzstd`; the C encoder is CLI-only, and
   `deny.toml` pins that boundary with a `wrappers` allowlist.
-- **Store compliance is a design constraint, not a footnote**: `PackKind::{Dlc, Mod}`
-  do not compile for App Store targets, mobile defaults disable auto-check/auto-download,
-  and `tpk pack` rejects HTML with inline or remote `<script>`. See `spec/tpk-v1.md` A.4.
+- **Store compliance is a design constraint, not a footnote**: the `app-store` feature
+  removes `PackKind::{Dlc, Mod}` at compile time — a pack manifest with `kind: dlc`
+  fails with `E_POLICY`, while a *channel* entry of that kind is dropped during
+  deserialization so one dlc entry cannot block base updates for App Store clients.
+  Mobile defaults disable auto-check/auto-download, and `tpk pack` rejects HTML with
+  inline or remote `<script>` plus remote `Worker`/`serviceWorker` literals in packed
+  `.js`/`.mjs`. See `spec/tpk-v1.md` §11.1.
 - **Mobile dev mode bypasses the Assets trait**: `cargo tauri ios dev` / `android dev`
   proxy all asset requests to the dev server — `Assets::get()` is never called. Use
   `cargo tauri ios build --debug` / `android build --debug` to test real OTA serving.

@@ -28,7 +28,7 @@
       "type": "integer",
       "minimum": 0,
       "default": 0,
-      "description": "At the threshold the client disables auto-check and auto-download and reports degraded status. Blacklisting only breaks the loop for one pack; this breaks it for the device."
+      "description": "At the threshold check() reports degraded without touching the network, and status() reports degraded. Blacklisting only breaks the loop for one pack; this breaks it for the device. Cleared by a successful notify_ready or by reset."
     },
     "last_watermark": {
       "type": "object",
@@ -36,19 +36,26 @@
       "default": {},
       "description": "Highest watermark seen, keyed by channel. A single scalar would make a stable->beta->stable switch discard every stable manifest forever."
     },
+    "version_floor": {
+      "type": "object",
+      "additionalProperties": { "type": "integer", "minimum": 0 },
+      "default": {},
+      "description": "Highest version_code ever committed, keyed by pack id. Raised when a revision is committed, never lowered, and it survives reset. Distinct from what is installed: blacklisting a layer removes it from the stack, so the planner must stop counting it as installed, but an older signed pack for that id must still be refused. Only a strictly lower version_code is a downgrade; equality is a reinstall, which is what lets reset re-fetch the current version. Backfilled when the store opens, from the committed revision's layers and from blacklist entries other than not_acknowledged, so a state.json written by an older build is protected from its first launch."
+    },
     "min_key_epoch": {
       "type": "integer",
       "minimum": 1,
       "default": 1,
-      "description": "Monotonic floor on signing key generation. Mirrored in keys-cache.json for audit."
+      "description": "Monotonic floor on signing key generation. Raised only by a verified channel manifest's key_epoch; survives reset."
     },
     "last_error": {
+      "description": "The last failure that kept a revision from reaching staged. Cleared by a successful stage and by an acknowledgement; absent does not mean the last check succeeded.",
       "type": ["object", "null"],
       "properties": {
         "code": { "type": "string", "pattern": "^E_[A-Z]+$" },
-        "message": { "type": "string" },
-        "at": { "type": "string" }
-      }
+        "message": { "type": "string" }
+      },
+      "required": ["code", "message"]
     }
   },
   "$defs": {
@@ -61,7 +68,7 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["id", "kind", "version_code", "file_sha256"],
+            "required": ["id", "kind", "version_code", "file_sha256", "size"],
             "properties": {
               "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
               "kind": { "enum": ["base", "patch", "dlc", "mod"] },
@@ -69,11 +76,10 @@
               "file_sha256": {
                 "type": "string",
                 "pattern": "^[0-9a-f]{64}$",
-                "description": "Also the file name in layers/. Verified once when staged, then tracked by (size, mtime, inode): re-hashing every layer at boot is O(bytes) and blows the startup budget."
+                "description": "Also the file name in layers/. Verified when staged; size and mtime_ns are recorded alongside it."
               },
               "size": { "type": "integer", "minimum": 0 },
-              "mtime_ns": { "type": "integer", "minimum": 0 },
-              "verified_at": { "type": "string" }
+              "mtime_ns": { "type": "integer", "minimum": 0 }
             }
           }
         }

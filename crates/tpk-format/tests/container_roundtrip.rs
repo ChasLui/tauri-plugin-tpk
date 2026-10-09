@@ -116,7 +116,7 @@ fn build(content: &[u8], damage: Damage) -> Built {
 }
 
 fn open_and_verify(built: &Built) -> Result<tpk_format::container::VerifiedPack, FormatError> {
-    UnverifiedPack::open(&built.path)?.verify(&built.trust, None, 1, 1)
+    UnverifiedPack::open(&built.path)?.verify(&built.trust, None, 1)
 }
 
 #[test]
@@ -128,7 +128,7 @@ fn a_freshly_built_pack_verifies_and_reads_back() {
     assert!(unverified.detached_signature().is_some());
     let expected_manifest_sha = unverified.manifest_sha256();
 
-    let mut pack = unverified.verify(&built.trust, None, 1, 1).unwrap();
+    let mut pack = unverified.verify(&built.trust, None, 1).unwrap();
     assert_eq!(pack.manifest_sha256(), expected_manifest_sha);
     assert_eq!(pack.manifest().id.as_str(), "core");
     assert_eq!(pack.manifest().version_code, 10000);
@@ -234,7 +234,7 @@ fn a_pack_without_a_signature_cannot_be_verified() {
     let unverified = UnverifiedPack::open(&built.path).unwrap();
     assert!(unverified.detached_signature().is_none());
     assert!(matches!(
-        unverified.verify(&built.trust, None, 1, 1).unwrap_err(),
+        unverified.verify(&built.trust, None, 1).unwrap_err(),
         FormatError::Signature(_)
     ));
 }
@@ -258,7 +258,7 @@ fn a_detached_signature_can_be_supplied_out_of_band() {
     }])
     .unwrap();
     let sig = key.sign(unverified.raw_manifest_bytes(), "timestamp:0", "c");
-    assert!(unverified.verify(&trust, Some(&sig), 1, 1).is_ok());
+    assert!(unverified.verify(&trust, Some(&sig), 1).is_ok());
 }
 
 #[test]
@@ -275,4 +275,43 @@ fn a_truncated_container_is_rejected() {
 fn a_nonexistent_file_reports_io() {
     let err = UnverifiedPack::open(Path::new("/nonexistent/nope.tpk")).unwrap_err();
     assert!(matches!(err, FormatError::Io(_)));
+}
+
+#[cfg(feature = "pack")]
+#[test]
+fn a_bounded_read_refuses_a_zstd_blob_past_its_ceiling() {
+    use tpk_format::manifest::{PackId, PackKind};
+    use tpk_format::pack::PackBuilder;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("base.tpk");
+    // Compressible and above the compression threshold, so it is stored as zstd.
+    let content = vec![b'a'; 64 * 1024];
+    let mut builder = PackBuilder::new(
+        PackKind::Base,
+        PackId::parse("core").unwrap(),
+        "1.0.0".parse().unwrap(),
+        1,
+        "2026-09-11T15:00:00Z",
+    );
+    builder.add_full("/app.js", &content).unwrap();
+    builder.build(&SecretKey::generate(), &path).unwrap();
+
+    let mut pack = UnverifiedPack::open(&path)
+        .unwrap()
+        .into_local_reader()
+        .unwrap();
+    let entry = pack.manifest().entries[0].clone();
+    assert!(entry.blob_size.unwrap() < entry.size.unwrap(), "not zstd");
+
+    let err = pack
+        .read_blob_bounded(&entry, content.len() as u64 - 1)
+        .unwrap_err();
+    assert!(matches!(err, FormatError::Spec(_)), "{err}");
+    assert_eq!(
+        pack.read_blob_bounded(&entry, content.len() as u64)
+            .unwrap(),
+        content
+    );
+    assert_eq!(pack.read_blob(&entry).unwrap(), content);
 }

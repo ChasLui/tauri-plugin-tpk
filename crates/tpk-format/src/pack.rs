@@ -274,6 +274,9 @@ impl PackBuilder {
             created_at: self.created_at,
             channel: self.channel,
             policies: PackPolicies {
+                // `trusted` defaults to true; a mod is the only untrusted kind,
+                // and it does not exist in an App Store build.
+                #[cfg(not(app_store))]
                 trusted: self.kind != PackKind::Mod,
                 ..PackPolicies::default()
             },
@@ -418,7 +421,7 @@ mod tests {
 
         let mut pack = UnverifiedPack::open(&out)
             .unwrap()
-            .verify(&trust(&key), None, 1, 1)
+            .verify(&trust(&key), None, 1)
             .unwrap();
         assert_eq!(pack.manifest_sha256(), summary.manifest_sha256);
         assert_eq!(pack.manifest().entries.len(), 3);
@@ -449,7 +452,7 @@ mod tests {
 
         let pack = UnverifiedPack::open(&out)
             .unwrap()
-            .verify(&trust(&key), None, 1, 1)
+            .verify(&trust(&key), None, 1)
             .unwrap();
         let paths: Vec<_> = pack
             .manifest()
@@ -500,7 +503,7 @@ mod tests {
 
         let pack = UnverifiedPack::open(&out)
             .unwrap()
-            .verify(&trust(&key), None, 1, 1)
+            .verify(&trust(&key), None, 1)
             .unwrap();
         let by_path: std::collections::HashMap<_, _> = pack
             .manifest()
@@ -540,7 +543,7 @@ mod tests {
 
         let pack = UnverifiedPack::open(&out)
             .unwrap()
-            .verify(&trust(&key), None, 1, 1)
+            .verify(&trust(&key), None, 1)
             .unwrap();
         assert_eq!(
             pack.manifest().entries[0].encoding,
@@ -579,7 +582,7 @@ mod tests {
 
         let mut pack = UnverifiedPack::open(&out)
             .unwrap()
-            .verify(&trust(&key), None, 1, 1)
+            .verify(&trust(&key), None, 1)
             .unwrap();
         let entry = pack.manifest().entries[0].clone();
         assert_eq!(entry.delta_base_sha256, Some(sha256_hex(&base)));
@@ -635,6 +638,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(app_store))]
     fn a_mod_pack_is_marked_untrusted() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("mod.tpk");
@@ -651,7 +655,7 @@ mod tests {
 
         let pack = UnverifiedPack::open(&out)
             .unwrap()
-            .verify(&trust(&key), None, 1, 1)
+            .verify(&trust(&key), None, 1)
             .unwrap();
         assert!(!pack.manifest().policies.trusted);
     }

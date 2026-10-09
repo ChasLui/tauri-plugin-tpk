@@ -26,7 +26,7 @@ What an ordinary frontend needs: poll for updates, download them, acknowledge th
 </td>
 <td>
 
-Lets the frontend enable or disable mod layers. Nothing loads mod layers today and the command refuses; the set exists so the capability name is reserved rather than being invented later with different semantics. Desktop only — see `spec/tpk-v1.md` appendix A.4.
+Lets the frontend enable or disable mod layers. Nothing loads mod layers today and the command refuses; the set exists so the capability name is reserved rather than being invented later with different semantics. Desktop only — see `spec/tpk-v1.md` §11.1.
 
 
 </td>

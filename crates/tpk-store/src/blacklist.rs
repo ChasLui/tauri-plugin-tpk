@@ -68,6 +68,10 @@ impl Reason {
             ErrorCode::Hash => Self::Hash,
             ErrorCode::Delta => Self::Delta,
             ErrorCode::Io => Self::Io,
+            // A shell mismatch is not a fault in the pack — a different shell
+            // could run it — so callers must never record one. The arm maps like
+            // the fallback and exists only to keep that invariant visible here.
+            ErrorCode::Shell => Self::Spec,
             _ => Self::Spec,
         }
     }

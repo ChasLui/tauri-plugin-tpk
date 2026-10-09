@@ -232,6 +232,32 @@ fn verify_counts_every_failing_file() {
 }
 
 #[test]
+fn argument_parse_errors_exit_3_and_help_exits_0() {
+    for args in [
+        &["pack", "--bogus"][..],
+        &[],
+        &[
+            "channel",
+            "--channel",
+            "stable",
+            "--pack",
+            "x.tpk",
+            "--url-base",
+            "https://cdn/",
+            "--rollout",
+            "256",
+        ],
+    ] {
+        let out = tpk().args(args).output().unwrap();
+        assert_eq!(exit_code(&out), 3, "tpk {args:?}");
+    }
+    for args in [["--help"], ["--version"]] {
+        let out = tpk().args(args).output().unwrap();
+        assert_eq!(exit_code(&out), 0, "tpk {args:?}");
+    }
+}
+
+#[test]
 fn inspect_prints_a_summary_without_a_key() {
     let f = Fixture::new();
     let pack = f.write_pack("base-core-1.2.3.tpk", None);

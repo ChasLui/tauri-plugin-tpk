@@ -42,7 +42,11 @@ pub struct Args {
     #[arg(long)]
     pub published_at: Option<String>,
 
-    /// Staged rollout percentage applied to every pack.
+    /// Staged rollout percentage for the newest pack of each id.
+    ///
+    /// Only the highest `version_code` per id is gated. The older packs of that
+    /// id (a base and the patches below the new one) stay at 100, so devices
+    /// that need them to reach the chain are not held back by the canary.
     #[arg(long, default_value_t = 100)]
     pub rollout: u8,
 
@@ -122,9 +126,28 @@ pub fn run(args: &Args) -> CliResult {
             url: format!("{url_base}{file_name}"),
             size: bytes.len() as u64,
             sha256: sha256_hex(&bytes),
+            // Only a DLC is skippable, and an App Store build has none.
+            #[cfg(not(app_store))]
             optional: manifest.kind == PackKind::Dlc,
-            rollout: args.rollout,
+            #[cfg(app_store)]
+            optional: false,
+            rollout: 100,
+            min_shell: manifest.min_shell.clone(),
+            max_shell: manifest.max_shell.clone(),
         });
+    }
+
+    let newest: Vec<bool> = refs
+        .iter()
+        .map(|p| {
+            refs.iter()
+                .all(|r| r.id != p.id || r.version_code <= p.version_code)
+        })
+        .collect();
+    for (pack, newest) in refs.iter_mut().zip(newest) {
+        if newest {
+            pack.rollout = args.rollout;
+        }
     }
 
     let min_shell = match &args.min_shell {

@@ -83,9 +83,13 @@ impl<R: Runtime> PackAssets<R> {
                 reason,
             }) => {
                 // The layer is bad, but a single broken asset must not take the
-                // app down. Report it and let the embedded copy answer; the
-                // store blacklists the layer on the next boot.
+                // app down. Report it and let the embedded copy answer.
                 log::error!("[tpk] layer {file_sha256} is corrupt: {reason}");
+                Ok(None)
+            }
+            Err(ResolveMiss::NotMaterialized { file_sha256 }) => {
+                // The cache was purged; setup rebuilds it in the background.
+                log::warn!("[tpk] {path} from layer {file_sha256} is not materialized yet");
                 Ok(None)
             }
         }
@@ -202,7 +206,26 @@ impl TpkHandle {
 /// through JNI on Android and is not available this early, so the store is
 /// opened later in the plugin `setup` hook — which still runs before any window
 /// exists.
+///
+/// Warns, and otherwise does nothing different, if the app uses the isolation
+/// pattern; see the log message for why that combination is unlikely to work.
 pub fn attach<R: Runtime>(context: &mut tauri::Context<R>) -> TpkHandle {
+    // The config carries the pattern in a form that is always present, unlike
+    // `tauri::Pattern::Isolation`, which only exists with tauri's `isolation`
+    // feature and so cannot be matched on from here.
+    if matches!(
+        context.config().app.security.pattern,
+        tauri_utils::config::PatternKind::Isolation { .. }
+    ) {
+        log::warn!(
+            "[tpk] the isolation pattern is enabled; packs and isolation are not \
+             known to work together. Tauri resolves the isolation frame's \
+             `index.html` itself and injects a hook generated at build time, so \
+             HTML shipped in a pack may not be served, and pack content will not \
+             carry that hook."
+        );
+    }
+
     // Two swaps: the first takes the embedded provider out (leaving a
     // placeholder), the second puts it back inside the overlay as its fallback.
     let embedded = context.set_assets(Box::new(EmptyAssets));
@@ -543,6 +566,21 @@ mod tests {
         assert!(handle.shared().resolver().is_none());
         // And the provider is in place and answering (with nothing, since the
         // mock has nothing).
+        assert!(context.assets().get(&"index.html".into()).is_none());
+    }
+
+    #[test]
+    fn attach_warns_but_still_works_under_the_isolation_pattern() {
+        let mut context: tauri::Context<MockRuntime> =
+            tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().app.security.pattern = tauri_utils::config::PatternKind::Isolation {
+            dir: "../dist-isolation".into(),
+        };
+
+        // Only that it degrades to a warning: `log` has no capture here, and a
+        // logger installed just to read one string back is not worth it.
+        let handle = attach(&mut context);
+        assert!(handle.shared().resolver().is_none());
         assert!(context.assets().get(&"index.html".into()).is_none());
     }
 

@@ -19,7 +19,7 @@ import {
 ## Outcomes are not errors
 
 `check()` and `download()` return a `status` for every ordinary answer —
-up to date, shell too old, blacklisted, disabled. A rejected promise means
+up to date, shell too old, disabled, degraded, failed. A rejected promise means
 something you cannot act on. Branch on `status`, not on `try/catch`.
 
 ## `check()`
@@ -48,8 +48,26 @@ interface PackSummary {
 }
 ```
 
-`notes` is CDN-controlled text, truncated to 200 characters on parse. Render it
-as text; it is not a sanctioned message channel into your UI.
+`notes` is CDN-controlled text. On parse, in this order: tag-like spans are
+stripped — anything from a `<` to the next `>` is dropped, an unterminated `<`
+swallows the rest, a stray `>` goes too — then formatting characters that can
+hide or reorder text are dropped, runs of control characters collapse to a
+single space, the result is trimmed, truncated to 200 visible characters, and
+becomes absent if nothing is left. Character references are deliberately left
+encoded, since decoding them could reintroduce the markup that was just removed.
+
+The rule is *drop what can hide or reorder text*, not *drop everything
+invisible*. Dropped: bidi embeddings and overrides (U+202A–U+202E), isolates and
+the deprecated shaping controls (U+2066–U+206F), the direction marks U+200E /
+U+200F and U+061C, zero-width space U+200B, soft hyphen U+00AD, U+180E, the BOM
+U+FEFF, interlinear annotations (U+FFF9–U+FFFB), musical formatting controls
+(U+1D173–U+1D17A) and the tag block (U+E0000–U+E007F). Kept: ZWNJ U+200C and ZWJ
+U+200D, which Persian and Arabic shaping and emoji sequences need; the word
+joiner and invisible math operators (U+2060–U+2064); and script-specific marks
+such as U+0600–U+0605. Deleting those would corrupt real notes to defend against
+nothing.
+
+Render it as text; it is not a sanctioned message channel into your UI.
 
 ## `download()`
 
@@ -66,8 +84,17 @@ type DownloadOutcome =
 the **next cold start**. Tell the user that; do not reload the WebView, which
 would mix modules from two revisions.
 
+`download()` acts on the most recent plan, not on a specific one you were
+handed. There is a single pending slot, so a launch auto-check and a `check()`
+your UI ran can overwrite each other, and what gets staged may not be what the
+user was shown. Both plans come from a signed manifest for the same channel and
+every pack is re-verified at stage, so the outcome is a different valid revision
+rather than an unchecked one.
+
 Downloads resume: a partial transfer lands in `.part` and a later call continues
-it with a Range request.
+it with a Range request. Finished downloads are deleted when the call returns,
+staged or not. If a finished download cannot be read back (the cache root was
+purged), the result is `failed` with `E_IO`, not a rejection.
 
 ## `notifyReady()`
 
@@ -102,6 +129,7 @@ interface Status {
   pending: boolean;              // a revision is waiting for the next cold start
   degraded: boolean;
   failed_layers: string[];       // layers that failed to load this launch, by hash
+  rolled_back?: string;          // revision rolled back during this launch's setup
   unsafe_capabilities: string[]; // see Security
   has_embedded_fallback: boolean;
   last_error?: { code: ErrorCode; message: string };
@@ -110,6 +138,21 @@ interface Status {
 
 `has_embedded_fallback: false` means the binary ships no `index.html`, so a
 rollback has nowhere to land. Treat it as a build error.
+
+`last_error` is the last failure that kept a revision from reaching `staged`: a
+failed channel poll, a failed download, a refused stage. Business outcomes are
+not failures and are never recorded — up-to-date, `shell_required`, blacklisted
+and `disabled` all leave it untouched, so a device that is merely a shell
+version behind does not show a permanent error. It is cleared by a successful
+`check` (the manifest was fetched and verified), by a successful stage, and by
+`notifyReady()`. Repeating the identical failure does not rewrite `state.json` —
+an offline device polling on a loop fails the same way every time, and that is
+not a change worth an fsync. It carries no timestamp: it answers "why is nothing
+landing", not "when did it break".
+
+`rolled_back` is how a rollback is reported. It happens in `setup`, before any
+window exists, so no `tpk://state` event is emitted for it. The value is fixed
+for the life of the process; `reset()` does not clear it.
 
 ## `reset(options?)`
 
@@ -124,7 +167,19 @@ not the default.
 
 `install_id` survives a reset on purpose: re-rolling it would move the device
 into a different rollout bucket and hand it a release it had already been
-excluded from.
+excluded from. So do the three anti-downgrade floors — the per-channel
+watermark, the `key_epoch` floor and `version_floor`, the highest `version_code`
+each pack id has ever committed here. A support action must not weaken them. The
+version floor refuses only what is strictly older, so a reset device can still
+re-fetch the version it was running; it just cannot be walked backwards.
+
+## When the plugin is off
+
+With `enabled: false`, or when `setup` degraded (no config, unusable keys, an
+unusable disk), no plugin state exists. Commands still answer in their
+documented shapes: `check()` and `download()` return `{ status: "disabled" }`,
+`notifyReady()` returns `{ status: "noop" }`, and `status()`, `reset()` and
+`set_mod_enabled` reject with `E_DISABLED`.
 
 ## Events
 
@@ -134,7 +189,7 @@ const un = await onDownloadProgress(({ downloaded, total, pack_index, pack_count
 });
 
 await onState(({ pointer, rev }) => {
-  // "staged" | "committed" | "rolled_back" | "reset"
+  // "staged" | "committed" | "reset" — rollbacks show up in status().rolled_back
 });
 
 await onError(({ code, message }) => {

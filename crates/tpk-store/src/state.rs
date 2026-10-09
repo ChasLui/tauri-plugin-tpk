@@ -118,6 +118,19 @@ pub struct StoreState {
     /// discard every stable manifest forever, with no error anywhere.
     #[serde(default)]
     pub last_watermark: BTreeMap<String, u64>,
+    /// Highest `version_code` ever committed, per pack id.
+    ///
+    /// Deliberately not the same thing as "what is installed". Blacklisting a
+    /// layer takes it out of the stack, and the planner has to stop counting it
+    /// as installed or it keeps asking for patches on a base that is gone — but
+    /// the device really did run that version, so an older signed pack for the
+    /// same id must still not come back. That is this map's whole job.
+    ///
+    /// Only a *strictly* lower `version_code` is refused against it. Equality is
+    /// a reinstall, not a downgrade, which is what lets `reset` re-fetch the
+    /// version the device is already on.
+    #[serde(default)]
+    pub version_floor: BTreeMap<PackId, u64>,
     /// Monotonic floor on the signing key generation.
     #[serde(default = "default_min_key_epoch")]
     pub min_key_epoch: u32,
@@ -143,6 +156,7 @@ impl StoreState {
             boot_attempts: 0,
             consecutive_rollbacks: 0,
             last_watermark: BTreeMap::new(),
+            version_floor: BTreeMap::new(),
             min_key_epoch: 1,
             last_error: None,
         }
@@ -220,6 +234,12 @@ impl StoreState {
     pub fn watermark_floor(&self, channel: &str) -> u64 {
         self.last_watermark.get(channel).copied().unwrap_or(0)
     }
+
+    /// Record that a pack id reached this `version_code`. Never lowers it.
+    pub fn observe_version(&mut self, id: &PackId, version_code: u64) {
+        let slot = self.version_floor.entry(id.clone()).or_insert(0);
+        *slot = (*slot).max(version_code);
+    }
 }
 
 impl Default for StoreState {
@@ -272,24 +292,67 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 
 /// Write bytes atomically.
 ///
+/// The temp file name is unique per call, so concurrent writers of the same
+/// target never share one.
+///
 /// # Errors
 ///
 /// Returns [`StoreError::Io`] if any step fails.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write as _;
+    write_via_temp(path, bytes, false)
+}
+
+/// [`atomic_write`] for a file named by the hash of its content.
+///
+/// If the final rename fails but the target already has the same bytes, another
+/// writer got there first, which is success. `state.json` must never take this
+/// path.
+pub(crate) fn atomic_write_content_addressed(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_via_temp(path, bytes, true)
+}
+
+/// Marker inside temp file names; the collector leaves such files alone.
+pub(crate) const TEMP_MARKER: &str = ".tmp.";
+
+fn write_via_temp(path: &Path, bytes: &[u8], content_addressed: bool) -> Result<()> {
+    use std::io::{Read as _, Write as _};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let parent = path
         .parent()
         .ok_or_else(|| StoreError::State(format!("{} has no parent", path.display())))?;
     std::fs::create_dir_all(parent)?;
 
-    let tmp = path.with_extension("tmp");
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| StoreError::State(format!("{} has no file name", path.display())))?
+        .to_string_lossy();
+    let tmp = parent.join(format!(
+        "{file_name}{TEMP_MARKER}{}.{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
     {
         let mut file = std::fs::File::create(&tmp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
     }
-    std::fs::rename(&tmp, path)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        let same_content = content_addressed
+            && std::fs::File::open(path).is_ok_and(|file| {
+                let mut existing = Vec::new();
+                file.take(bytes.len().saturating_add(1) as u64)
+                    .read_to_end(&mut existing)
+                    .is_ok()
+                    && existing == bytes
+            });
+        if !same_content {
+            return Err(e.into());
+        }
+    }
 
     // Durability of the rename itself, not just of the bytes.
     if let Ok(dir) = std::fs::File::open(parent) {
@@ -438,10 +501,44 @@ mod tests {
 
         assert_ne!(first, second);
         assert_eq!(StoreState::parse(&second).unwrap().boot_attempts, 3);
-        assert!(
-            !path.with_extension("tmp").exists(),
-            "temp file left behind"
-        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(TEMP_MARKER))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind");
+    }
+
+    #[test]
+    fn concurrent_writers_of_one_target_do_not_collide() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result");
+        let body = b"same content-addressed bytes".repeat(10_000);
+
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let body = body.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        atomic_write_content_addressed(&path, &body).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+    }
+
+    #[test]
+    fn content_addressed_write_does_not_accept_an_unrelated_existing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(sha256_hex(b"bytes").to_hex());
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(atomic_write_content_addressed(&path, b"bytes").is_err());
     }
 
     #[test]
