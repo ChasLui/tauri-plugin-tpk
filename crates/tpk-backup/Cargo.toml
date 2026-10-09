@@ -1,0 +1,25 @@
+[package]
+name = "tpk-backup"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Excludes a directory from platform backups: NSURLIsExcludedFromBackupKey on Apple targets, a no-op elsewhere."
+
+# Apple only, so a Linux or Windows build never sees an Objective-C dependency.
+# `target_vendor` rather than `target_os`: the key is Foundation's, and it is the
+# same on macOS, iOS, tvOS and watchOS.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSError",
+  "NSString",
+  "NSURL",
+  "NSValue",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true

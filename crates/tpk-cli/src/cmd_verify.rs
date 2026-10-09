@@ -82,30 +82,27 @@ fn verify_one(trust: &TrustStore, path: &Path, min_epoch: u32) -> Result<String,
 }
 
 fn verify_pack(trust: &TrustStore, path: &Path, min_epoch: u32) -> Result<String, String> {
-    // A pack's manifest carries no epoch of its own; the channel manifest that
-    // advertises it does. Try each epoch the store knows about. `verify`
-    // consumes the reader, so the pack is reopened per attempt.
-    let mut last = String::new();
-    for epoch in min_epoch..=trust.max_epoch().max(min_epoch) {
-        match UnverifiedPack::open(path)
-            .map_err(|e| e.to_string())?
-            .verify(trust, None, epoch, min_epoch)
-        {
-            Ok(pack) => {
-                let m = pack.manifest();
-                return Ok(format!(
-                    "{:?} {} {} (version_code {}, {} entries, key epoch {epoch})",
-                    m.kind,
-                    m.id,
-                    m.version,
-                    m.version_code,
-                    m.entries.len()
-                ));
-            }
-            Err(e) => last = e.to_string(),
-        }
-    }
-    Err(last)
+    // A pack's manifest carries no epoch of its own; any key at or above the
+    // floor is accepted, and the epoch that verified is reported.
+    let unverified = UnverifiedPack::open(path).map_err(|e| e.to_string())?;
+    let signature = unverified
+        .detached_signature()
+        .ok_or_else(|| "pack carries no signature".to_string())?;
+    let epoch = trust
+        .verify_at_or_above(unverified.raw_manifest_bytes(), signature, min_epoch)
+        .map_err(|e| e.to_string())?;
+    let pack = unverified
+        .verify(trust, None, min_epoch)
+        .map_err(|e| e.to_string())?;
+    let m = pack.manifest();
+    Ok(format!(
+        "{:?} {} {} (version_code {}, {} entries, key epoch {epoch})",
+        m.kind,
+        m.id,
+        m.version,
+        m.version_code,
+        m.entries.len()
+    ))
 }
 
 fn verify_channel(trust: &TrustStore, path: &Path, min_epoch: u32) -> Result<String, String> {

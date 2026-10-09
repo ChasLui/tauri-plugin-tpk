@@ -25,13 +25,6 @@ stack as layers over the binary's embedded assets.
 - [Error codes](./error-codes.md) — the fourteen frozen codes
 - [Local testing](./local-testing.md) — serving a channel from your laptop
 
-## Migrating
-
-- [From tauri-plugin-hotswap](./migrating-from-hotswap.md)
-
 ## Specification
 
-The frozen format contract is `spec/tpk-v1.md`. **Appendix A of that file
-overrides the body** — it records where the original specification conflicts
-with Tauri's real API, with App Store and Play policy, and with measured
-performance.
+The frozen format contract is `spec/tpk-v1.md`.

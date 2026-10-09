@@ -4,7 +4,7 @@
 //! can branch on a stable code rather than on prose.
 //!
 //! Note what does *not* come through here: `check` and `download` report
-//! up-to-date, shell-required, blacklisted and disabled as **outcomes**, not as
+//! up-to-date, shell-required, disabled, degraded and failed as **outcomes**, not as
 //! errors. An `Err` means something the caller cannot act on.
 
 use serde::{Serialize, Serializer};
@@ -17,6 +17,10 @@ pub enum Error {
     /// Configuration is missing or invalid.
     #[error("configuration: {0}")]
     Config(String),
+
+    /// The plugin is off: disabled by configuration, or its setup degraded.
+    #[error("the plugin is disabled")]
+    Disabled,
 
     /// The plugin never finished starting up.
     #[error("the plugin is not initialized")]
@@ -44,6 +48,7 @@ impl Error {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::Config(_) => ErrorCode::Spec,
+            Self::Disabled => ErrorCode::Disabled,
             Self::NotInitialized => ErrorCode::State,
             Self::Format(e) => e.code(),
             Self::Store(e) => e.code(),
@@ -73,6 +78,7 @@ mod tests {
     #[test]
     fn errors_map_to_their_codes() {
         assert_eq!(Error::Config("x".into()).code(), ErrorCode::Spec);
+        assert_eq!(Error::Disabled.code(), ErrorCode::Disabled);
         assert_eq!(Error::NotInitialized.code(), ErrorCode::State);
         assert_eq!(
             Error::Format(tpk_format::error::FormatError::Hash("x".into())).code(),

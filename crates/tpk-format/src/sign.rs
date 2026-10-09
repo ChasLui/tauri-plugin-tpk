@@ -83,11 +83,6 @@ impl TrustStore {
         Ok(Self { keys: parsed })
     }
 
-    /// The highest epoch present in the store.
-    pub fn max_epoch(&self) -> u32 {
-        self.keys.iter().map(|(e, _)| *e).max().unwrap_or(0)
-    }
-
     /// Verify `payload` against `signature`, requiring the declared epoch.
     ///
     /// Only keys whose epoch equals `declared_epoch` are tried. Accepting any
@@ -115,29 +110,65 @@ impl TrustStore {
                 "key epoch {declared_epoch} is below the trusted floor {min_epoch}"
             )));
         }
+        self.verify_matching(
+            payload,
+            signature,
+            |epoch| epoch == declared_epoch,
+            || format!("no trusted key for epoch {declared_epoch}"),
+        )
+        .map(|_| ())
+    }
+
+    /// Verify `payload` against `signature` with any trusted key whose epoch is
+    /// at or above `min_epoch`, returning the epoch of the key that verified.
+    ///
+    /// For packs, which carry no epoch of their own: after a rotation the shell
+    /// lists both generations while the floor still sits at the old one, and a
+    /// pack signed by the newer key must load. Keys below the floor are never
+    /// tried.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Signature`] when no key is at or above the floor,
+    /// the signature is malformed, or no such key verifies it.
+    pub fn verify_at_or_above(
+        &self,
+        payload: &[u8],
+        signature: &str,
+        min_epoch: u32,
+    ) -> Result<u32> {
+        self.verify_matching(
+            payload,
+            signature,
+            |epoch| epoch >= min_epoch,
+            || format!("no trusted key at or above epoch {min_epoch}"),
+        )
+    }
+
+    fn verify_matching(
+        &self,
+        payload: &[u8],
+        signature: &str,
+        accept: impl Fn(u32) -> bool,
+        no_candidates: impl FnOnce() -> String,
+    ) -> Result<u32> {
         // Resolve the epoch before touching attacker-controlled signature bytes,
         // so an unknown epoch reports as such instead of as a parse failure.
         let candidates: Vec<_> = self
             .keys
             .iter()
-            .filter(|(epoch, _)| *epoch == declared_epoch)
-            .map(|(_, key)| key)
+            .filter(|(epoch, _)| accept(*epoch))
             .collect();
         if candidates.is_empty() {
-            return Err(FormatError::Signature(format!(
-                "no trusted key for epoch {declared_epoch}"
-            )));
+            return Err(FormatError::Signature(no_candidates()));
         }
 
         let signature = decode_signature(signature)?;
-        for key in candidates {
-            if key.verify(payload, &signature, false).is_ok() {
-                return Ok(());
-            }
-        }
-        Err(FormatError::Signature(
-            "no trusted key verified the signature".into(),
-        ))
+        candidates
+            .into_iter()
+            .find(|(_, key)| key.verify(payload, &signature, false).is_ok())
+            .map(|(epoch, _)| *epoch)
+            .ok_or_else(|| FormatError::Signature("no trusted key verified the signature".into()))
     }
 }
 
@@ -223,11 +254,6 @@ mod tests {
             epoch: 1
         }])
         .is_err());
-    }
-
-    #[test]
-    fn max_epoch_reports_the_newest_generation() {
-        assert_eq!(store(&[(PUBKEY, 1), (PUBKEY, 3)]).max_epoch(), 3);
     }
 
     #[test]

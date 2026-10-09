@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ChasLui/tauri-plugin-tpk/spec/json-schema/channel-manifest.schema.json",
   "title": "TPK channel manifest",
-  "description": "The static JSON a client fetches from the CDN, with a detached .minisig alongside it. Cross-field rules that JSON Schema cannot express (no duplicate id+version_code, patch parents below their child) are enforced by ChannelManifest::parse.",
+  "description": "The static JSON a client fetches from the CDN, with a detached .minisig alongside it. Cross-field rules that JSON Schema cannot express (no duplicate id+version_code, patch parents below their child, a pack's min_shell not above its max_shell) are enforced by ChannelManifest::parse.",
   "type": "object",
   "required": ["spec", "channel", "published_at", "watermark", "packs"],
   "properties": {
@@ -20,14 +20,15 @@
       "default": 1,
       "description": "Which signing key generation covers this manifest. Clients keep a monotonic min_key_epoch and refuse anything below it, which is what lets a leaked key be retired without waiting for every device to drop it."
     },
-    "min_shell": { "type": "string" },
+    "min_shell": { "type": "string", "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$" },
     "force_shell": {
       "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$",
       "description": "When set and above the running shell, no pack is applied at all. Use only when the shell should not receive even a hotfix."
     },
     "notes": {
       "type": "string",
-      "description": "Truncated to 200 characters on parse. CDN-controlled text; not intended for display to end users."
+      "description": "On parse: markup stripped, characters that can hide or reorder text dropped, control runs collapsed, then truncated to 200 visible characters; absent if nothing remains. Written verbatim by tpk channel. CDN-controlled text; not intended for display to end users."
     },
     "packs": {
       "type": "array",
@@ -41,7 +42,7 @@
       "properties": {
         "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$" },
         "kind": { "enum": ["base", "patch", "dlc", "mod"] },
-        "version": { "type": "string" },
+        "version": { "type": "string", "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$" },
         "version_code": { "type": "integer", "minimum": 1 },
         "parent_version_code": {
           "type": "integer",
@@ -62,6 +63,16 @@
           "maximum": 100,
           "default": 100,
           "description": "Staged rollout percentage. Clients bucket themselves with sha256(install_id, id, version_code); devices outside the bucket still advance their watermark."
+        },
+        "min_shell": {
+          "type": "string",
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$",
+          "description": "Copied from the pack's own manifest. Clients skip the pack when the running shell is below it."
+        },
+        "max_shell": {
+          "type": "string",
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$",
+          "description": "Copied from the pack's own manifest. Clients skip the pack when the running shell is above it."
         }
       },
       "allOf": [

@@ -31,6 +31,11 @@ on:
         description: Percentage of devices to offer it to
         required: false
         default: "10"
+      released_shell:
+        description: >-
+          Shell version already released, as MAJOR.MINOR.PATCH. Empty skips the
+          min_shell assertion.
+        required: false
       dry_run:
         description: Build and verify, but upload nothing
         required: false
@@ -40,9 +45,17 @@ on:
 permissions:
   contents: write # for the cold-backup GitHub Release
 
+# Inputs reach scripts only through env, never through ${{ }} inside run:,
+# where a crafted version string would be spliced into the shell source.
 env:
   CARGO_TERM_COLOR: always
   PACK_ID: core
+  CHANNEL: ${{ github.event.inputs.channel }}
+  VERSION: ${{ github.event.inputs.version }}
+  KIND: ${{ github.event.inputs.kind }}
+  ROLLOUT: ${{ github.event.inputs.rollout }}
+  RELEASED_SHELL: ${{ github.event.inputs.released_shell }}
+  KEY_EPOCH: ${{ vars.TPK_KEY_EPOCH || 1 }}
 
 concurrency:
   # Two concurrent publishes race on latest.json, and the loser's watermark
@@ -55,6 +68,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Fail before anything is built or any secret is in scope.
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          semver='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+          [[ "$VERSION" =~ $semver ]] || {
+            echo "::error::version must be SemVer like 1.2.3, got: $VERSION"
+            exit 1
+          }
+          [[ "$ROLLOUT" =~ ^([1-9][0-9]?|100)$ ]] || {
+            echo "::error::rollout must be an integer 1-100, got: $ROLLOUT"
+            exit 1
+          }
+          # Releases only: sort -V, which the min_shell assertion compares with,
+          # sorts a prerelease above its release, the one direction where it
+          # disagrees with SemVer. Refusing prereleases here removes it.
+          if [ -n "$RELEASED_SHELL" ]; then
+            [[ "$RELEASED_SHELL" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+              echo "::error::released_shell must be a released version like" \
+                "1.2.3 — no prerelease or build metadata, got: $RELEASED_SHELL"
+              exit 1
+            }
+          fi
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -96,60 +133,142 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
-      # A patch needs its parent's exact bytes. Fetch the published pack rather
-      # than rebuilding it: a rebuild that differs by one byte produces a patch
-      # whose parent link no client can satisfy.
-      - name: Fetch the parent pack
-        if: github.event.inputs.kind == 'patch'
+      # The channel manifest is rebuilt on every publish, so whatever it should
+      # keep advertising has to be passed back in: packs of other ids and, for a
+      # patch, the base and patches of PACK_ID below it. A fresh device, or one
+      # that missed a patch, needs that whole chain.
+      #
+      # A patch also needs its parents' exact bytes. Fetch the published packs
+      # rather than rebuilding them: a rebuild that differs by one byte produces
+      # a patch whose parent link no client can satisfy.
+      - name: Fetch the published channel
         env:
           CDN_BASE: ${{ vars.CDN_BASE }}
+          TPK_PUBKEY: ${{ vars.TPK_PUBKEY }}
         run: |
           set -euo pipefail
-          curl -fsSL "$CDN_BASE/${{ github.event.inputs.channel }}/latest.json" -o previous.json
-          url=$(jq -er --arg id "$PACK_ID" \
-            'first(.packs[] | select(.id == $id) | .url)' previous.json)
-          curl -fsSL "$url" -o parent.tpk
-          # The published manifest's digest is what the client will check the
-          # parent against, so check it here too.
-          want=$(jq -er --arg id "$PACK_ID" \
-            'first(.packs[] | select(.id == $id) | .sha256)' previous.json)
-          got=$(sha256sum parent.tpk | cut -d' ' -f1)
-          [ "$want" = "$got" ] || { echo "::error::parent digest mismatch"; exit 1; }
+          base="$CDN_BASE/$CHANNEL"
+          mkdir -p previous
+          : > kept.txt
+          : > chain.txt
+
+          status=$(curl -sSL -o previous.json -w '%{http_code}' \
+            "$base/latest.json")
+          case "$status" in
+            200) ;;
+            404)
+              if [ "$KIND" = patch ]; then
+                echo "::error::nothing to patch; publish a base first"
+                exit 1
+              fi
+              rm -f previous.json
+              exit 0
+              ;;
+            *)
+              echo "::error::fetching latest.json returned HTTP $status"
+              exit 1
+              ;;
+          esac
+
+          # Which published packs stay in the channel:
+          #  - other ids: always.
+          #  - PACK_ID, from its newest base onward: that base and its patches.
+          #    Older same-id packs are dropped; a partially rolled-out base
+          #    becomes a non-newest pack here, goes to 100%, and everyone
+          #    converges on it. For a patch this is also its --parent chain.
+          #  - PACK_ID on a base release at 100%: nothing; the new base
+          #    replaces it for every device.
+          # A base below 100% keeps the current chain, so devices outside the
+          # bucket (fresh installs included) still have something to reach.
+          # Lowest version_code first, so chain.txt is in --parent order.
+          drop_chain=false
+          if [ "$KIND" = base ] && [ "$ROLLOUT" -eq 100 ]; then
+            drop_chain=true
+          fi
+          jq -r --arg id "$PACK_ID" --argjson drop "$drop_chain" \
+            '([.packs[] | select(.id == $id and .kind == "base")
+                | .version_code] | max // 0) as $floor
+              | .packs | sort_by(.version_code)[]
+              | select(.id != $id
+                  or ($drop | not) and .version_code >= $floor)
+              | [.id, .url, .sha256] | @tsv' previous.json |
+          while IFS=$'\t' read -r id url sha; do
+            name="${url##*/}"
+            # tpk channel rebuilds every url as --url-base + file name. A pack
+            # served from anywhere else would be republished under a dead URL.
+            [ "$url" = "$base/$name" ] || {
+              echo "::error::$url is not served from $base/"
+              exit 1
+            }
+            curl -fsSL "$url" -o "previous/$name"
+            # The published digest is what clients check the pack against.
+            got=$(sha256sum "previous/$name" | cut -d' ' -f1)
+            [ "$sha" = "$got" ] || {
+              echo "::error::$url digest mismatch"
+              exit 1
+            }
+            echo "previous/$name" >> kept.txt
+            if [ "$id" = "$PACK_ID" ]; then
+              echo "previous/$name" >> chain.txt
+            fi
+          done
+
+          # These packs get re-signed into the new manifest; a digest fetched
+          # from the same CDN proves nothing about who built them.
+          files=()
+          while IFS= read -r f; do files+=(--file "$f"); done < kept.txt
+          if [ "${#files[@]}" -gt 0 ]; then
+            tpk verify --pubkey "$TPK_PUBKEY" \
+              --min-epoch "$KEY_EPOCH" "${files[@]}"
+          fi
 
       - name: Pack
         env:
           TPK_SIGNING_KEY: ${{ secrets.TPK_SIGNING_KEY }}
+          VERSION_CODE: ${{ steps.identity.outputs.version_code }}
+          CREATED_AT: ${{ steps.identity.outputs.created_at }}
         run: |
           set -euo pipefail
-          args=""
-          if [ "${{ github.event.inputs.kind }}" = "patch" ]; then
-            args="--parent parent.tpk"
+          out="$PACK_ID-$VERSION.tpk"
+          # Packs are uploaded as immutable; reusing a published name would
+          # overwrite a pack the channel still advertises.
+          [ ! -e "previous/$out" ] || {
+            echo "::error::$out is already published"
+            exit 1
+          }
+          parents=()
+          if [ "$KIND" = "patch" ]; then
+            while IFS= read -r f; do parents+=(--parent "$f"); done < chain.txt
           fi
-          # shellcheck disable=SC2086
           tpk pack \
-            --kind "${{ github.event.inputs.kind }}" \
+            --kind "$KIND" \
             --id "$PACK_ID" \
-            --version "${{ github.event.inputs.version }}" \
-            --version-code "${{ steps.identity.outputs.version_code }}" \
-            --created-at "${{ steps.identity.outputs.created_at }}" \
-            --channel "${{ github.event.inputs.channel }}" \
+            --version "$VERSION" \
+            --version-code "$VERSION_CODE" \
+            --created-at "$CREATED_AT" \
+            --channel "$CHANNEL" \
             --dist dist/ \
-            $args \
-            --out "$PACK_ID-${{ github.event.inputs.version }}.tpk"
+            "${parents[@]}" \
+            --out "$out"
 
+      # --rollout gates only the newest pack of each id; the base and patches
+      # below it stay at 100 so a canary does not hold back fresh devices.
       - name: Build and sign the channel manifest
         env:
           TPK_SIGNING_KEY: ${{ secrets.TPK_SIGNING_KEY }}
           CDN_BASE: ${{ vars.CDN_BASE }}
         run: |
           set -euo pipefail
+          packs=()
+          while IFS= read -r f; do packs+=(--pack "$f"); done < kept.txt
           tpk channel \
-            --channel "${{ github.event.inputs.channel }}" \
-            --pack "$PACK_ID-${{ github.event.inputs.version }}.tpk" \
-            --url-base "$CDN_BASE/${{ github.event.inputs.channel }}/" \
+            --channel "$CHANNEL" \
+            "${packs[@]}" \
+            --pack "$PACK_ID-$VERSION.tpk" \
+            --url-base "$CDN_BASE/$CHANNEL/" \
             --watermark auto \
-            --key-epoch "${{ vars.TPK_KEY_EPOCH || 1 }}" \
-            --rollout "${{ github.event.inputs.rollout }}" \
+            --key-epoch "$KEY_EPOCH" \
+            --rollout "$ROLLOUT" \
             --out latest.json
 
       # Verify with the *public* key, the same way a client will. Verifying
@@ -160,10 +279,10 @@ jobs:
         run: |
           set -euo pipefail
           tpk verify --pubkey "$TPK_PUBKEY" \
-            --min-epoch "${{ vars.TPK_KEY_EPOCH || 1 }}" \
+            --min-epoch "$KEY_EPOCH" \
             --file latest.json \
-            --file "$PACK_ID-${{ github.event.inputs.version }}.tpk"
-          tpk inspect "$PACK_ID-${{ github.event.inputs.version }}.tpk"
+            --file "$PACK_ID-$VERSION.tpk"
+          tpk inspect "$PACK_ID-$VERSION.tpk"
 
       # The client refuses any manifest at or below the watermark it has already
       # seen for this channel, and does so silently. Catching it here is the
@@ -182,6 +301,43 @@ jobs:
           fi
           echo "watermark $old -> $new"
 
+      # A channel min_shell above the shell users actually run makes
+      # check/download return shell_required for all of them; a pack min_shell
+      # above it makes plan skip that pack. Either way the content silently
+      # never arrives, and nothing before this point notices. Optional: repos
+      # that do not track the released shell version leave the input empty.
+      - name: min_shell is reachable by the released shell
+        run: |
+          set -euo pipefail
+          if [ -z "$RELEASED_SHELL" ]; then
+            echo "released_shell is empty; skipping the min_shell assertion"
+            exit 0
+          fi
+
+          # sort -V orders plain x.y.z exactly the way SemVer does. It diverges
+          # only when one side carries a prerelease, which it sorts *above* the
+          # release (1.0.0-rc.1 > 1.0.0). released_shell is validated to be a
+          # release, so all that is left of that is a prerelease min_shell
+          # failing loudly instead of passing silently.
+          above() { # is $1 > $2 ?
+            [ "$1" != "$2" ] &&
+              [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
+          }
+
+          fail=0
+          while IFS=$'\t' read -r what min; do
+            if above "$min" "$RELEASED_SHELL"; then
+              echo "::error::$what min_shell $min is above the released" \
+                "shell $RELEASED_SHELL"
+              fail=1
+            else
+              echo "$what min_shell $min <= $RELEASED_SHELL"
+            fi
+          done < <(jq -r '[["channel", .min_shell]]
+              + [.packs[] | ["pack \(.id) \(.version_code)", .min_shell]]
+            | map(select(.[1] != null))[] | @tsv' latest.json)
+          exit "$fail"
+
       - name: Upload
         if: github.event.inputs.dry_run != 'true'
         env:
@@ -191,16 +347,44 @@ jobs:
           BUCKET: ${{ vars.CDN_BUCKET }}
         run: |
           set -euo pipefail
-          dest="s3://$BUCKET/${{ github.event.inputs.channel }}"
+          dest="s3://$BUCKET/$CHANNEL"
+
+          # Check the origin before any upload, including packs no longer in
+          # latest.json. Only an explicit missing-object response is safe.
+          watermark=$(jq -er '.watermark' latest.json)
+          for key in "$PACK_ID-$VERSION.tpk" "$watermark.json" "$watermark.json.minisig"; do
+            if error=$(aws s3api head-object --bucket "$BUCKET" \
+              --key "$CHANNEL/$key" 2>&1); then
+              echo "::error::$CHANNEL/$key is already published"
+              exit 1
+            elif [[ "$error" != *"(404)"* && "$error" != *"(NotFound)"* ]]; then
+              echo "::error::cannot check $CHANNEL/$key: $error"
+              exit 1
+            fi
+          done
 
           # Packs first, manifest last. A manifest advertising a pack that is
           # not yet reachable produces download failures for every client that
           # polls in the gap. Packs are content-addressed, so immutable.
-          aws s3 cp "$PACK_ID-${{ github.event.inputs.version }}.tpk" "$dest/" \
+          aws s3 cp "$PACK_ID-$VERSION.tpk" "$dest/" \
             --cache-control "max-age=31536000, immutable"
 
           # Let the CDN settle before anything points at the new object.
           sleep 30
+
+          # An immutable copy named after its watermark, so a rollback or an
+          # audit can fetch exactly the manifest a device saw. Read the
+          # watermark back out of the manifest — recomputing the timestamp here
+          # would drift from what `tpk channel --watermark auto` wrote. It goes
+          # up before latest.json, so a device that sees the new latest.json can
+          # always fetch the pinned copy.
+          # Byte-identical to latest.json, so the same detached signature covers
+          # it. Immutable, hence the long cache the packs get, not the short one
+          # latest.json gets.
+          aws s3 cp latest.json "$dest/$watermark.json" \
+            --cache-control "max-age=31536000, immutable"
+          aws s3 cp latest.json.minisig "$dest/$watermark.json.minisig" \
+            --cache-control "max-age=31536000, immutable"
 
           aws s3 cp latest.json "$dest/" --cache-control "max-age=60"
           aws s3 cp latest.json.minisig "$dest/" --cache-control "max-age=60"
@@ -214,12 +398,13 @@ jobs:
           TPK_PUBKEY: ${{ vars.TPK_PUBKEY }}
         run: |
           set -euo pipefail
-          base="$CDN_BASE/${{ github.event.inputs.channel }}"
+          base="$CDN_BASE/$CHANNEL"
           curl -fsSL "$base/latest.json" -o published.json
           curl -fsSL "$base/latest.json.minisig" -o published.json.minisig
 
           url=$(jq -er --arg id "$PACK_ID" \
-            'first(.packs[] | select(.id == $id) | .url)' published.json)
+            '[.packs[] | select(.id == $id)] | max_by(.version_code) | .url' \
+            published.json)
           curl -fsSL "$url" -o published.tpk
 
           tpk verify --pubkey "$TPK_PUBKEY" \
@@ -234,18 +419,23 @@ jobs:
             exit 1
           }
 
+          # The pinned copy is only worth anything if it is the same bytes as
+          # the manifest devices are being served, since that is what a rollback
+          # or an audit will replay.
+          curl -fsSL "$base/$want.json" -o pinned.json
+          diff -q latest.json pinned.json || {
+            echo "::error::$want.json differs from the uploaded latest.json"
+            exit 1
+          }
+
       # A cold backup of the exact bytes. Without the parent pack you cannot
       # build the next patch, and an S3 lifecycle rule will eventually eat it.
       - name: Cold backup
         if: github.event.inputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          CHANNEL: ${{ github.event.inputs.channel }}
-          KIND: ${{ github.event.inputs.kind }}
-          VERSION: ${{ github.event.inputs.version }}
           VERSION_CODE: ${{ steps.identity.outputs.version_code }}
           CREATED_AT: ${{ steps.identity.outputs.created_at }}
-          ROLLOUT: ${{ github.event.inputs.rollout }}
         run: |
           set -euo pipefail
           tag="content-$CHANNEL-$VERSION_CODE"

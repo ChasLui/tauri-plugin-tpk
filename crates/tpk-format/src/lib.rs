@@ -2,8 +2,7 @@
 //!
 //! This crate is the single source of truth for the on-disk pack format:
 //! path rules, manifest parsing, the ZIP container and signature verification.
-//! See `spec/tpk-v1.md` — and note that Appendix A of that document overrides
-//! the body wherever they disagree.
+//! See `spec/tpk-v1.md`.
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
 

@@ -48,8 +48,13 @@ different conversation with a reviewer.
 
 ### Check the pack kinds
 
-- [ ] No `dlc` packs in a mobile build (they do not compile for App Store
-      targets — if yours does, check your target configuration)
+- [ ] The App Store build is compiled with `--features app-store`, which removes
+      `PackKind::{Dlc, Mod}` outright (`spec/tpk-v1.md` §11.1). Without that
+      feature a `dlc` pack from the channel is downloaded, staged and served
+      like any other — check the build, then the claim in review notes
+- [ ] No `dlc` packs published to the channel an App Store build reads anyway.
+      With the feature on those entries are dropped from the channel manifest
+      rather than rejecting it, so the mistake is silent on the client
 - [ ] No `mod` packs, and no UI enabling third-party content (Guideline
       3.2.2(i))
 - [ ] Nothing a pack delivers unlocks a feature that is not already in the
@@ -67,7 +72,11 @@ different conversation with a reviewer.
 Apple's review checklist names *Optimizing Your App's Data for iCloud Backup* as
 expected reading.
 
-- [ ] `layers/` excluded from iCloud backup
+- [ ] `layers/` excluded from iCloud backup — the plugin sets
+      `NSURLIsExcludedFromBackupKey` on that directory after it is created, and
+      again after every successful stage, because inheritance by later files is
+      not documented; verify rather than implement it, and check the warning is
+      absent from the launch log
 - [ ] Android: `<exclude domain="file" path="tpk/layers/" />` in the data
       extraction rules — Auto Backup's 25 MB ceiling silently skips the whole
       app's backup when exceeded

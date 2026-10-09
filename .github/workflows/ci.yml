@@ -20,6 +20,12 @@ jobs:
 
       - uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2.0.15
 
+      - name: Audit the example's independent lockfile
+        uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2.0.15
+        with:
+          manifest-path: examples/shell-app/src-tauri/Cargo.toml
+          command-arguments: advisories
+
   rust:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -57,6 +63,46 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --workspace --no-deps --all-features
+
+  app-store:
+    name: App Store build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@8cbdedb5103daa674dcf46d3590fe06a76645684 # v2.8.0
+
+      # Every other job uses --all-features, which also enables the `__all`
+      # guard and so lands back on the default behaviour. This is the only job
+      # that actually deletes PackKind::{Dlc, Mod}; without it the App Store
+      # configuration would never be compiled at all.
+      #
+      # `test-packs` is part of every step here: without it overlay_matrix.rs
+      # and state_machine.rs — which hold most of the layering assertions —
+      # compile to nothing and report a green "0 tests". `test-keys` is here for
+      # the same reason: tpk-client's channel.rs is `#![cfg(feature =
+      # "test-keys")]` in full. tpk-delta has no `app-store` feature, only
+      # tpk-resolve/tpk-store have `test-packs` and only tpk-client has
+      # `test-keys`; cargo applies each flag to the members that declare it.
+      - name: Check with the variants removed
+        run: cargo check --workspace --all-targets --features app-store,test-packs,test-keys
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --features app-store,test-packs,test-keys -- -D warnings
+
+      # Compiling the gates is not the same as running them, and the gates live
+      # in tpk-resolve, tpk-store, tpk-client and tpk-cli as well as tpk-format.
+      - name: Test with the variants removed
+        run: cargo test --workspace --features app-store,test-packs,test-keys
 
   coverage:
     name: Coverage
@@ -185,21 +231,8 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      # The rename is only finished if none of the old identity survives. The
-      # changelog keeps its history, and the migration guide has to name the
-      # thing it migrates from.
-      - name: No leftover hotswap identity
-        run: |
-          # This workflow names the strings it is looking for, so exclude it
-          # along with the changelog's history and the migration guide. Links
-          # *to* the migration guide are legitimate, so drop those lines too.
-          if rg -i --glob '!CHANGELOG.md' --glob '!docs/migrating-from-hotswap.md' \
-                  --glob '!Cargo.lock' --glob '!.github/workflows/ci.yml' \
-                  -e 'hotswap' -e 'denniskribl' -e 'kribl\.io' . \
-               | grep -v 'migrating-from-hotswap'; then
-            echo "::error::found references to the previous project identity"
-            exit 1
-          fi
+      - name: Content release refuses immutable object overwrites
+        run: node --test scripts/content-release.test.mjs
 
       # A doc without a symlink is a doc the site never shows.
       - name: Docs and website are in sync

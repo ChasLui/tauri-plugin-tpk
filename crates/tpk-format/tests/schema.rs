@@ -185,6 +185,18 @@ fn pack_rules_agree_on_rejection() {
             }),
         ),
         (
+            "a version that is not SemVer",
+            Box::new(|v: &mut Value| v["version"] = serde_json::json!("1.0")),
+        ),
+        (
+            "a min_shell that is not SemVer",
+            Box::new(|v: &mut Value| v["min_shell"] = serde_json::json!("not-a-version")),
+        ),
+        (
+            "a max_shell that is not SemVer",
+            Box::new(|v: &mut Value| v["max_shell"] = serde_json::json!("2.0")),
+        ),
+        (
             "an empty entry list",
             Box::new(|v: &mut Value| v["entries"] = serde_json::json!([])),
         ),
@@ -209,6 +221,11 @@ fn pack_rules_agree_on_rejection() {
 #[test]
 fn a_delta_entry_satisfies_both() {
     let mut doc = base_pack();
+    doc["kind"] = serde_json::json!("patch");
+    doc["parent"] = serde_json::json!({
+        "id": "core", "version": "0.9.0", "version_code": 9000,
+        "manifest_sha256": HASH_C,
+    });
     doc["entries"] = serde_json::json!([{
         "path": "/assets/big.bin",
         "op": "delta",
@@ -228,6 +245,28 @@ fn a_delta_entry_satisfies_both() {
         .unwrap()
         .remove("delta_base_sha256");
     agree_pack(&missing_base, false, "a delta without delta_base_sha256");
+
+    for kind in ["base", "dlc", "mod"] {
+        let mut not_patch = doc.clone();
+        not_patch["kind"] = serde_json::json!(kind);
+        not_patch.as_object_mut().unwrap().remove("parent");
+        if kind == "mod" {
+            not_patch["policies"] = serde_json::json!({ "trusted": false });
+        }
+        agree_pack(
+            &not_patch,
+            false,
+            &format!("a {kind} pack carrying a delta"),
+        );
+    }
+
+    let mut dlc_with_parent = doc.clone();
+    dlc_with_parent["kind"] = serde_json::json!("dlc");
+    agree_pack(
+        &dlc_with_parent,
+        false,
+        "a dlc pack with a parent carrying a delta",
+    );
 }
 
 #[test]
@@ -240,6 +279,18 @@ fn a_delete_entry_satisfies_both() {
 #[test]
 fn a_valid_channel_satisfies_both() {
     agree_channel(&channel_manifest(), true, "a channel with one base pack");
+}
+
+#[test]
+fn a_channel_entry_with_a_shell_range_satisfies_both() {
+    let mut doc = channel_manifest();
+    doc["packs"][0]["min_shell"] = serde_json::json!("1.2.0");
+    doc["packs"][0]["max_shell"] = serde_json::json!("2.5.0");
+    agree_channel(&doc, true, "a pack entry carrying min_shell and max_shell");
+
+    let parsed = ChannelManifest::parse(serde_json::to_vec(&doc).unwrap().as_slice()).unwrap();
+    assert_eq!(parsed.packs[0].min_shell, Some("1.2.0".parse().unwrap()));
+    assert_eq!(parsed.packs[0].max_shell, Some("2.5.0".parse().unwrap()));
 }
 
 #[test]
@@ -272,6 +323,24 @@ fn channel_rules_agree_on_rejection() {
             }),
         ),
         (
+            "a force_shell that is not SemVer",
+            Box::new(|v: &mut Value| v["force_shell"] = serde_json::json!("not-a-version")),
+        ),
+        (
+            "a channel min_shell that is not SemVer",
+            Box::new(|v: &mut Value| v["min_shell"] = serde_json::json!("not-a-version")),
+        ),
+        (
+            "a pack min_shell that is not SemVer",
+            Box::new(|v: &mut Value| {
+                v["packs"][0]["min_shell"] = serde_json::json!("not-a-version")
+            }),
+        ),
+        (
+            "a pack max_shell with a leading zero",
+            Box::new(|v: &mut Value| v["packs"][0]["max_shell"] = serde_json::json!("2.05.0")),
+        ),
+        (
             "a patch without parent_version_code",
             Box::new(|v: &mut Value| v["packs"][0]["kind"] = serde_json::json!("patch")),
         ),
@@ -285,9 +354,87 @@ fn channel_rules_agree_on_rejection() {
 }
 
 #[test]
+fn the_semver_pattern_agrees_with_semver() {
+    // Every field that parses to `semver::Version` carries the semver.org regex;
+    // it has to accept exactly what `semver::Version` parses, including what it
+    // serializes back out.
+    let channel = schema("channel-manifest.schema.json");
+    let pack = schema("pack-manifest.schema.json");
+    let pattern = channel["properties"]["min_shell"]["pattern"]
+        .as_str()
+        .expect("channel min_shell has a pattern");
+    for (doc, pointer) in [
+        (&channel, "/properties/min_shell"),
+        (&channel, "/properties/force_shell"),
+        (&channel, "/$defs/packRef/properties/version"),
+        (&channel, "/$defs/packRef/properties/min_shell"),
+        (&channel, "/$defs/packRef/properties/max_shell"),
+        (&pack, "/properties/version"),
+        (&pack, "/properties/min_shell"),
+        (&pack, "/properties/max_shell"),
+        (&pack, "/properties/parent/properties/version"),
+    ] {
+        let field = doc
+            .pointer(pointer)
+            .unwrap_or_else(|| panic!("no {pointer}"));
+        assert_eq!(
+            field["pattern"], pattern,
+            "one pattern everywhere: {pointer}"
+        );
+    }
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "type": "string",
+        "pattern": pattern,
+    }))
+    .unwrap();
+
+    for raw in [
+        "0.0.0",
+        "2.3.0",
+        "10.20.30",
+        "1.0.0-alpha",
+        "1.0.0-alpha.1",
+        "1.0.0-0.3.7",
+        "1.0.0-x.7.z.92",
+        "1.0.0-x-y-z.--",
+        "1.0.0+20130313144700",
+        "1.0.0-beta+exp.sha.5114f85",
+        "1.0.0+21AF26D3----117B344092BD",
+        "1.0.0+001",
+        "",
+        "1",
+        "1.2",
+        "1.2.3.4",
+        "01.2.3",
+        "1.02.3",
+        "1.2.03",
+        "1.2.3-01",
+        "1.2.3-",
+        "1.2.3+",
+        "1.2.3-a..b",
+        "1.2.3 ",
+        " 1.2.3",
+        "v1.2.3",
+        "not-a-version",
+    ] {
+        let parsed = raw.parse::<semver::Version>();
+        let by_schema = validator.is_valid(&serde_json::json!(raw));
+        assert_eq!(
+            by_schema,
+            parsed.is_ok(),
+            "pattern and semver disagree on {raw:?}"
+        );
+        if let Ok(version) = parsed {
+            let shown = version.to_string();
+            assert!(validator.is_valid(&serde_json::json!(shown)), "{shown}");
+        }
+    }
+}
+
+#[test]
 fn a_store_state_document_matches_its_schema() {
-    // No Rust type for this yet (step 4); the schema is frozen ahead of it, so
-    // pin a representative document now.
+    // The Rust type (`StoreState`) lives in tpk-store, which depends on this
+    // crate, so pin a representative document of what it writes instead.
     let doc = serde_json::json!({
         "spec": "tpk-state/1",
         "pointer": "committed",
@@ -301,7 +448,6 @@ fn a_store_state_document_matches_its_schema() {
                 "file_sha256": HASH_A,
                 "size": 8400000,
                 "mtime_ns": 1757600000000000000u64,
-                "verified_at": "2026-09-11T15:00:00Z",
             }],
         },
         "staged": null,

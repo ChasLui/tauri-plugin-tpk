@@ -182,9 +182,14 @@ pub enum PackKind {
     ///
     /// Not available on App Store targets: DPLA §3.3.1(C) forbids enabling
     /// additional features through a non-App-Store distribution mechanism,
-    /// regardless of whether they are paid.
+    /// regardless of whether they are paid. The `app-store` feature removes
+    /// this variant outright, so such a build has no code path that accepts it.
+    #[cfg(not(app_store))]
     Dlc,
     /// Unsigned user content. Desktop only, and gated behind configuration.
+    ///
+    /// Removed by the `app-store` feature, same as [`PackKind::Dlc`].
+    #[cfg(not(app_store))]
     Mod,
 }
 
@@ -350,10 +355,10 @@ impl PackManifest {
     ///   `op`/`encoding` field combination the specification does not allow
     /// - [`FormatError::Parent`] when the parent link is missing, forbidden or
     ///   inconsistent with this pack
-    /// - [`FormatError::Policy`] when policy globs are set but unsupported
+    /// - [`FormatError::Policy`] when policy globs are set but unsupported, and
+    ///   — in an `app-store` build — when `kind` is `dlc` or `mod`
     pub fn parse(raw: &[u8]) -> Result<Self> {
-        let manifest: Self =
-            serde_json::from_slice(raw).map_err(|e| FormatError::Spec(e.to_string()))?;
+        let manifest: Self = serde_json::from_slice(raw).map_err(|e| decode_error(raw, &e))?;
         manifest.validate()?;
         Ok(manifest)
     }
@@ -415,6 +420,7 @@ impl PackManifest {
     }
 
     fn validate_policies(&self) -> Result<()> {
+        #[cfg(not(app_store))]
         if self.kind == PackKind::Mod && self.policies.trusted {
             return Err(FormatError::Policy(
                 "a mod pack must declare trusted = false".into(),
@@ -451,12 +457,19 @@ impl PackManifest {
                 }
             }
             previous = Some(path);
+            // Only a patch stacks on its parent. Every other kind replaces the
+            // same-id layers when staged, so a delta's base would be gone.
+            if entry.op == Op::Delta && self.kind != PackKind::Patch {
+                return Err(FormatError::Spec(format!(
+                    "entry {path:?} is a delta but only a patch pack may carry deltas"
+                )));
+            }
             validate_entry_shape(entry)?;
         }
         Ok(())
     }
 
-    /// Reject entries whose decoded size exceeds `max_asset_bytes`.
+    /// Reject entries whose decoded or stored size exceeds `max_asset_bytes`.
     ///
     /// Separate from [`Self::parse`] because the limit is runtime configuration,
     /// not part of the format.
@@ -466,7 +479,9 @@ impl PackManifest {
     /// Returns [`FormatError::Policy`] naming the first oversized entry.
     pub fn validate_size_limit(&self, max_asset_bytes: u64) -> Result<()> {
         for entry in &self.entries {
-            if let Some(size) = entry.size {
+            // The stored blob is read before it is decoded, so its size needs
+            // the same ceiling as the content it decodes to.
+            for size in [entry.size, entry.blob_size].into_iter().flatten() {
                 if size > max_asset_bytes {
                     return Err(FormatError::Policy(format!(
                         "entry {} is {size} bytes, over the {max_asset_bytes} byte limit",
@@ -477,6 +492,33 @@ impl PackManifest {
         }
         Ok(())
     }
+}
+
+/// Classify a `serde_json` failure on a pack manifest.
+#[cfg(not(app_store))]
+fn decode_error(_raw: &[u8], e: &serde_json::Error) -> FormatError {
+    FormatError::Spec(e.to_string())
+}
+
+/// Classify a `serde_json` failure on a pack manifest.
+///
+/// `dlc` and `mod` are not variants in this build, so serde reports them as an
+/// unknown `kind` — a document shape complaint for what is really a
+/// distribution-policy decision. Re-read the raw `kind` on the error path only
+/// and report `E_POLICY`, the same code `validate_policies` already uses for
+/// the other kind-driven rule.
+#[cfg(app_store)]
+fn decode_error(raw: &[u8], e: &serde_json::Error) -> FormatError {
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(raw) {
+        if let Some(kind) = v.get("kind").and_then(serde_json::Value::as_str) {
+            if matches!(kind, "dlc" | "mod") {
+                return FormatError::Policy(format!(
+                    "pack kind {kind:?} does not exist in an App Store build"
+                ));
+            }
+        }
+    }
+    FormatError::Spec(e.to_string())
 }
 
 fn validate_entry_shape(entry: &Entry) -> Result<()> {
@@ -655,6 +697,35 @@ mod tests {
     }
 
     #[test]
+    #[cfg(app_store)]
+    fn an_app_store_build_has_no_dlc_or_mod_kind() {
+        for kind in ["dlc", "mod"] {
+            let mut v = base_manifest(vec![full_entry("/a.html", HASH_B)]);
+            v["kind"] = serde_json::json!(kind);
+            let err = parse(&v).unwrap_err();
+            assert_eq!(
+                err.code(),
+                crate::error::ErrorCode::Policy,
+                "{kind} must read as a policy decision, not a malformed document: {err}"
+            );
+            assert!(err.to_string().contains("App Store"), "{kind}: {err}");
+        }
+    }
+
+    #[test]
+    #[cfg(app_store)]
+    fn base_and_patch_still_parse_in_an_app_store_build() {
+        assert!(parse(&base_manifest(vec![full_entry("/a.html", HASH_B)])).is_ok());
+
+        let mut v = base_manifest(vec![full_entry("/a.html", HASH_B)]);
+        v["kind"] = serde_json::json!("patch");
+        v["parent"] = serde_json::json!({
+            "id": "core", "version": "0.9.0", "version_code": 9000, "manifest_sha256": HASH_C,
+        });
+        assert!(parse(&v).is_ok());
+    }
+
+    #[test]
     fn rejects_zero_version_code() {
         let mut v = base_manifest(vec![full_entry("/a.html", HASH_B)]);
         v["version_code"] = serde_json::json!(0);
@@ -771,23 +842,37 @@ mod tests {
         }
     }
 
+    fn delta_entry(encoding: &str) -> serde_json::Value {
+        serde_json::json!({
+            "path": "/big.bin",
+            "op": "delta",
+            "size": 1048576,
+            "sha256": HASH_A,
+            "blob": blob_name(HASH_B, ".zst"),
+            "blob_sha256": HASH_B,
+            "blob_size": 4096,
+            "encoding": encoding,
+            "delta_base_sha256": HASH_C,
+        })
+    }
+
+    fn patch_manifest(entries: Vec<serde_json::Value>) -> serde_json::Value {
+        let mut v = base_manifest(entries);
+        v["kind"] = serde_json::json!("patch");
+        v["parent"] = serde_json::json!({
+            "id": "core", "version": "0.9.0", "version_code": 9000, "manifest_sha256": HASH_C,
+        });
+        v
+    }
+
     #[test]
     fn delta_requires_base_hash_and_bsdiff_encoding() {
         let delta = |encoding: &str, with_base: bool| {
-            let mut e = serde_json::json!({
-                "path": "/big.bin",
-                "op": "delta",
-                "size": 1048576,
-                "sha256": HASH_A,
-                "blob": blob_name(HASH_B, ".zst"),
-                "blob_sha256": HASH_B,
-                "blob_size": 4096,
-                "encoding": encoding,
-            });
-            if with_base {
-                e["delta_base_sha256"] = serde_json::json!(HASH_C);
+            let mut e = delta_entry(encoding);
+            if !with_base {
+                e.as_object_mut().unwrap().remove("delta_base_sha256");
             }
-            base_manifest(vec![e])
+            patch_manifest(vec![e])
         };
         assert!(
             parse(&delta("zstd+bsdiff", false)).is_err(),
@@ -798,6 +883,26 @@ mod tests {
             "needs bsdiff encoding"
         );
         assert!(parse(&delta("zstd+bsdiff", true)).is_ok());
+    }
+
+    #[test]
+    fn only_a_patch_may_carry_deltas() {
+        #[cfg(not(app_store))]
+        let kinds = ["base", "dlc", "mod"];
+        // `dlc` and `mod` are refused earlier, by the kind itself.
+        #[cfg(app_store)]
+        let kinds = ["base"];
+
+        for kind in kinds {
+            let mut v = base_manifest(vec![delta_entry("zstd+bsdiff")]);
+            v["kind"] = serde_json::json!(kind);
+            if kind == "mod" {
+                v["policies"] = serde_json::json!({ "trusted": false });
+            }
+            let err = parse(&v).unwrap_err();
+            assert!(matches!(err, FormatError::Spec(_)), "{kind}: {err}");
+            assert!(err.to_string().contains("only a patch"), "{kind}: {err}");
+        }
     }
 
     #[test]
@@ -824,6 +929,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(app_store))]
     fn mod_must_declare_untrusted() {
         let mut v = base_manifest(vec![full_entry("/a.html", HASH_B)]);
         v["kind"] = serde_json::json!("mod");
@@ -875,6 +981,13 @@ mod tests {
         let m = parse(&base_manifest(vec![entry])).unwrap();
         assert!(m.validate_size_limit(64 * 1024 * 1024).is_err());
         assert!(m.validate_size_limit(128 * 1024 * 1024).is_ok());
+
+        // A small decoded size does not excuse a huge stored blob.
+        let mut entry = full_entry("/small.bin", HASH_B);
+        entry["size"] = serde_json::json!(100);
+        entry["blob_size"] = serde_json::json!(100 * 1024 * 1024);
+        let m = parse(&base_manifest(vec![entry])).unwrap();
+        assert!(m.validate_size_limit(64 * 1024 * 1024).is_err());
     }
 
     #[test]

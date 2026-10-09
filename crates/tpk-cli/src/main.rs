@@ -44,7 +44,19 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    // clap exits 2 on bad arguments, which the spec reserves for verification
+    // failures; usage errors are 3.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            let _ = err.print();
+            return if err.use_stderr() {
+                ExitCode::from(EXIT_USAGE)
+            } else {
+                ExitCode::SUCCESS
+            };
+        }
+    };
     let result = match cli.command {
         Command::Keygen(args) => cmd_keygen::run(&args),
         Command::Pack(args) => cmd_pack::run(&args),

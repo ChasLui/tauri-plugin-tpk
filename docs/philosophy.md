@@ -93,8 +93,10 @@ would let a condemned release slip back in.
   not the bottleneck and this is machinery you do not need.
 - **You cannot control the signing key's custody.** A compromised key cannot be
   fully retired until a shell update ships. If that is unacceptable, so is this.
-- **You are shipping `mod` or `dlc` content to mobile.** Those pack kinds do not
-  compile for App Store targets. That is not an oversight.
+- **You are shipping `mod` or `dlc` content to mobile.** Those pack kinds must not
+  reach App Store targets. That is not an oversight: build with
+  `--features app-store` and both variants stop existing at compile time
+  (`spec/tpk-v1.md` §11.1). `mod` layers are never loaded on any target.
 
 ## Further reading
 

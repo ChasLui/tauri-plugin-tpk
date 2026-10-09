@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use tpk_format::error::ErrorCode;
 use tpk_format::manifest::{PackId, PackKind, PackManifest, Sha256Hex};
 
 /// Where a layer sits in the stack.
@@ -16,8 +17,14 @@ pub enum LayerOrder {
     /// Applied over a base in `version_code` order.
     Patch,
     /// Optional content stacked above patches.
+    ///
+    /// Removed by the `app-store` feature, along with [`PackKind::Dlc`].
+    #[cfg(not(app_store))]
     Dlc,
     /// Unsigned user content. Highest, and only when explicitly enabled.
+    ///
+    /// Removed by the `app-store` feature, along with [`PackKind::Mod`].
+    #[cfg(not(app_store))]
     Mod,
 }
 
@@ -26,7 +33,9 @@ impl From<PackKind> for LayerOrder {
         match kind {
             PackKind::Base => Self::Base,
             PackKind::Patch => Self::Patch,
+            #[cfg(not(app_store))]
             PackKind::Dlc => Self::Dlc,
+            #[cfg(not(app_store))]
             PackKind::Mod => Self::Mod,
         }
     }
@@ -78,6 +87,10 @@ pub struct FailedLayer {
     pub file_sha256: Option<Sha256Hex>,
     /// What went wrong.
     pub reason: String,
+    /// The frozen code for it: `Io` for an unreadable file, `Hash` for a hash
+    /// mismatch, the verifier's own code for a failed verification, `Disabled`
+    /// for a mod layer while mods are off, and `State` for a full stack.
+    pub code: ErrorCode,
 }
 
 #[cfg(test)]
@@ -86,29 +99,39 @@ mod tests {
 
     #[test]
     fn layer_order_stacks_low_to_high() {
-        let mut orders = [
-            LayerOrder::Mod,
-            LayerOrder::Base,
-            LayerOrder::Dlc,
-            LayerOrder::Patch,
-        ];
-        orders.sort();
-        assert_eq!(
-            orders,
+        #[cfg(not(app_store))]
+        let (mut orders, expected) = (
+            [
+                LayerOrder::Mod,
+                LayerOrder::Base,
+                LayerOrder::Dlc,
+                LayerOrder::Patch,
+            ],
             [
                 LayerOrder::Base,
                 LayerOrder::Patch,
                 LayerOrder::Dlc,
-                LayerOrder::Mod
-            ]
+                LayerOrder::Mod,
+            ],
         );
+        #[cfg(app_store)]
+        let (mut orders, expected) = (
+            [LayerOrder::Patch, LayerOrder::Base],
+            [LayerOrder::Base, LayerOrder::Patch],
+        );
+
+        orders.sort();
+        assert_eq!(orders, expected);
     }
 
     #[test]
     fn pack_kind_maps_to_order() {
         assert_eq!(LayerOrder::from(PackKind::Base), LayerOrder::Base);
         assert_eq!(LayerOrder::from(PackKind::Patch), LayerOrder::Patch);
-        assert_eq!(LayerOrder::from(PackKind::Dlc), LayerOrder::Dlc);
-        assert_eq!(LayerOrder::from(PackKind::Mod), LayerOrder::Mod);
+        #[cfg(not(app_store))]
+        {
+            assert_eq!(LayerOrder::from(PackKind::Dlc), LayerOrder::Dlc);
+            assert_eq!(LayerOrder::from(PackKind::Mod), LayerOrder::Mod);
+        }
     }
 }

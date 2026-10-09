@@ -63,7 +63,14 @@ pub struct TpkConfig {
     #[serde(default = "default_auto_on_desktop")]
     pub auto_check_on_launch: bool,
 
-    /// Download automatically once an update is found. Same default rationale.
+    /// Download automatically once the launch check has found an update. Same
+    /// default rationale.
+    ///
+    /// Qualifies [`Self::auto_check_on_launch`] and nothing else: on its own it
+    /// does nothing. A frontend that calls `check` itself decides for itself
+    /// whether to call `download`, and a second download started behind its back
+    /// would fetch the same packs twice and emit progress events nobody asked
+    /// for.
     #[serde(default = "default_auto_on_desktop")]
     pub auto_download: bool,
 

@@ -244,13 +244,10 @@ tpk verify --pubkey "$TPK_PUBKEY" --file latest.json --file core-2.1.0.tpk
 | **[The Updater Boundary](docs/updater-boundary.md)** | Pack or binary |
 | **[Error Codes](docs/error-codes.md)** | The fourteen frozen codes |
 | **[Local Testing](docs/local-testing.md)** | Serving a channel from your laptop |
-| **[Migrating](docs/migrating-from-hotswap.md)** | Coming from the previous plugin |
 | **[CONTRIBUTING](CONTRIBUTING.md)** | How to contribute |
 | **[CHANGELOG](CHANGELOG.md)** | Version history |
 
-The frozen format contract is [`spec/tpk-v1.md`](spec/tpk-v1.md). **Appendix A
-overrides the body** — it records where the original specification conflicts with
-Tauri's real API, with store policy, and with measured performance.
+The frozen format contract is [`spec/tpk-v1.md`](spec/tpk-v1.md).
 
 ---
 

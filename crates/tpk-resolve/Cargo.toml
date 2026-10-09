@@ -20,6 +20,10 @@ base64.workspace = true
 default = []
 # Dev-only: lets the overlay tests build real signed packs to resolve against.
 test-packs = ["tpk-format/pack"]
+# See tpk-format for what these mean. Forwarded so the match arms here and the
+# variants there are added and removed together.
+app-store = ["tpk-format/app-store"]
+__all = ["tpk-format/__all"]
 
 [dev-dependencies]
 tempfile.workspace = true

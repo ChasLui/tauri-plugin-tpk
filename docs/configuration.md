@@ -30,15 +30,23 @@ That is the whole required set. Everything else has a default.
 | `pubkeys` | array | **required** | Trusted signing keys |
 | `enabled` | bool | `true` | Turn the plugin off without removing it |
 | `channel` | string | `"stable"` | Channel to poll |
-| `auto_check_on_launch` | bool | desktop `true`, mobile `false` | Check during startup |
-| `auto_download` | bool | desktop `true`, mobile `false` | Download once an update is found |
+| `auto_check_on_launch` | bool | desktop `true`, mobile `false` | Check on a spawned task after startup |
+| `auto_download` | bool | desktop `true`, mobile `false` | Download once the *launch* check finds an update |
 | `cache_budget_bytes` | number | desktop 32 MiB, mobile 8 MiB | In-memory decoded-asset budget. `0` disables the cache |
 | `headers` | object | `{}` | Headers sent with manifest and pack requests |
 | `seed_dir` | string | unset | Bundled seed pack, relative to the resource directory |
 
 The section uses `deny_unknown_fields`. A misspelled key fails loudly at startup
 rather than silently taking its default and leaving you convinced you configured
-something you did not.
+something you did not. Tauri deserializes `plugins.tpk` before the plugin's
+setup runs, so an unknown key, a missing `manifest_url` or `pubkeys`, or a wrong
+type makes `Builder::build` / `run` return an error and the app does not start —
+this holds with `init_with_config` too, if the section is present.
+
+A misspelled *section* name (`plugins.tkp`) or no section at all is different:
+the plugin logs and stays disabled, and the app runs on its embedded assets.
+Other setup problems (an unusable disk, bad `pubkeys`, a non-SemVer app
+version) are handled the same way.
 
 ### `manifest_url`
 
@@ -71,6 +79,21 @@ release. The SLA and its limits are in
 
 Generate a key pair with `tpk keygen`. The secret key never belongs in the
 repository — read it from the environment in CI.
+
+### Automatic updating
+
+`auto_check_on_launch` runs a `check` on a task spawned at the end of `setup`,
+so it never holds up the first window. It reuses the command paths, which means
+the events a frontend sees are exactly the ones it would see had it called
+`check` itself. A failure is logged and lands in `status().last_error`; it never
+fails startup and never records a strike against a pack. A device in the
+degraded state returns before any network call, so it polls nothing.
+
+`auto_download` qualifies that launch check and nothing else. It does **not**
+act on a `check` your frontend triggered: a frontend that calls `check` itself
+will call `download` itself, so a plugin-initiated download would fetch the same
+packs twice and emit progress events the UI never asked for. On its own, with
+`auto_check_on_launch` off, `auto_download` does nothing.
 
 ### Mobile defaults
 

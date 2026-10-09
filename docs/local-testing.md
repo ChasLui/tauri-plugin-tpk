@@ -78,8 +78,9 @@ tpk pack --kind base --id core \
 ```
 
 Stage it, then cold start three times. On the third the revision is rolled back
-and blacklisted, `onState` fires with `rolled_back`, and the app is back on the
-previous content.
+and blacklisted, `status().rolled_back` names it (no `onState` event fires — the
+rollback happens before any window exists), and the app is back on the previous
+content.
 
 Then confirm the blacklist holds: republish the same `version_code` and watch
 `check()` decline it. Bumping `version_code` is the only way past — deliberately,

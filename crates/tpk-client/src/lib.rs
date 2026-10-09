@@ -4,7 +4,7 @@
 //! over a verified manifest and what the device already has, so every rule it
 //! enforces can be tested without a disk or a network.
 //!
-//! See `spec/tpk-v1.md` section 4, and Appendix A for the revisions.
+//! See `spec/tpk-v1.md` section 4.
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
