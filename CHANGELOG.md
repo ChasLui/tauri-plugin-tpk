@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Embed the Common Controls activation manifest so Windows plugin tests start
+  instead of exiting with `STATUS_ENTRYPOINT_NOT_FOUND` before running.
 - Validate patch ancestry, shell compatibility and persisted revision state;
   rebuild missing or corrupt delta caches with bounded reads and atomic writes.
 - Keep launch checks and automatic downloads out of degraded or blacklisted
