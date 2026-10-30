@@ -38,7 +38,7 @@ url = "2"
 sha2 = "0.11"
 # zip: default-features MUST stay off. The default feature set pulls in
 # zstd-sys (C bindings), bzip2, lzma-rust2 and ppmd-rust at runtime.
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 ruzstd = "0.9"
 bsdiff = "0.2"
 criterion = { version = "0.8", default-features = false }
