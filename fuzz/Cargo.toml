@@ -1,5 +1,8 @@
 # Not a workspace member: cargo-fuzz builds this with its own nightly flags and
 # a sanitizer, which must not leak into the normal build.
+# Stay standalone even when this repository is nested in another checkout.
+[workspace]
+
 [package]
 name = "tpk-fuzz"
 version = "0.0.0"

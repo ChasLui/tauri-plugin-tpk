@@ -1,0 +1,3 @@
+# Keep dependency updates compatible with the workspace's declared MSRV.
+[resolver]
+incompatible-rust-versions = "fallback"
