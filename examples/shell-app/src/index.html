@@ -25,8 +25,8 @@
 
   <pre id="log"></pre>
 
-  <!-- No inline script: `tpk pack` rejects HTML containing inline or remote
-       <script>, so this page can be shipped as a pack unchanged. -->
+  <!-- Keep executable code in local external files so this page is packable.
+       The conservative packaging lint also scans tag-like text in comments. -->
   <script type="module" src="./main.js"></script>
 </body>
 </html>

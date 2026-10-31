@@ -59,6 +59,7 @@ pub(crate) async fn reset<R: Runtime>(
     app.try_state::<TpkState>()
         .ok_or(Error::Disabled)?
         .reset(&app, options.unwrap_or_default())
+        .await
 }
 
 /// Enable or disable a mod layer. Requires `tpk:allow-mods`.

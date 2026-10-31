@@ -49,8 +49,8 @@ pub enum Skipped {
         /// What the device has.
         installed: u64,
     },
-    /// Its `version_code` is below this id's persistent floor: the device has
-    /// run a newer version, even if that version is no longer installed.
+    /// Its eligible chain cannot reach this id's persistent floor: the device
+    /// has run a newer version, even if that version is no longer installed.
     ///
     /// Separate from [`Self::NotNewer`] because they mean different things to
     /// whoever reads `plan.skipped()`. `NotNewer` is the ordinary "this device
@@ -165,29 +165,58 @@ pub fn plan(
     // a base and the patches above it can be planned in one pass.
     let mut projected: HashMap<PackId, u64> = ctx.installed.clone();
 
-    // Staging a base or DLC replaces every same-id layer, so when a newer one is
-    // itself eligible, the older chain beneath it would be downloaded for nothing.
+    let mut candidates: Vec<&PackRef> = manifest.packs.iter().collect();
+    // Lowest layer first, then by version_code: a base has to be decided before
+    // the patches that sit on it.
+    candidates.sort_by_key(|p| (layer_rank(p.kind), p.version_code));
+
+    // Increasing patch edges form a DAG. In reverse version order, each child's
+    // terminal is known before its parent. Keep the highest eligible terminal
+    // per (id, revision), sharing suffixes rather than walking a chain per base.
+    // These checks ignore installed parents: this pass describes which chains
+    // could be reached; the selection pass still requires the actual parent.
+    let mut terminals: HashMap<PackId, HashMap<u64, u64>> = HashMap::new();
+    for pack in candidates
+        .iter()
+        .rev()
+        .filter(|p| p.kind == PackKind::Patch)
+    {
+        let parent = pack.parent_version_code.unwrap_or(0);
+        if check(manifest, ctx, is_blacklisted, pack, parent, None).is_err() {
+            continue;
+        }
+        let revisions = terminals.entry(pack.id.clone()).or_default();
+        let terminal = revisions
+            .get(&pack.version_code)
+            .copied()
+            .unwrap_or(pack.version_code);
+        let reachable = revisions.entry(parent).or_insert(parent);
+        *reachable = (*reachable).max(terminal);
+    }
+
+    // Staging a base or DLC replaces every same-id layer. It may supersede an
+    // older chain only if it can reach the floor through eligible patches.
     let mut newest: HashMap<PackId, u64> = HashMap::new();
     for pack in &manifest.packs {
         if pack.kind == PackKind::Patch {
             continue;
         }
         let installed = ctx.installed.get(&pack.id).copied().unwrap_or(0);
-        if check(manifest, ctx, is_blacklisted, pack, installed, None).is_ok() {
+        if check(manifest, ctx, is_blacklisted, pack, installed, None)
+            .and_then(|()| check_terminal_floor(ctx, pack, &terminals))
+            .is_ok()
+        {
             let code = newest.entry(pack.id.clone()).or_insert(0);
             *code = (*code).max(pack.version_code);
         }
     }
 
-    let mut candidates: Vec<&PackRef> = manifest.packs.iter().collect();
-    // Lowest layer first, then by version_code: a base has to be decided before
-    // the patches that sit on it.
-    candidates.sort_by_key(|p| (layer_rank(p.kind), p.version_code));
-
     for pack in candidates {
         let current = projected.get(&pack.id).copied().unwrap_or(0);
         let newest = newest.get(&pack.id).copied();
-        if let Err(reason) = check(manifest, ctx, is_blacklisted, pack, current, newest) {
+        if let Err(reason) = check(manifest, ctx, is_blacklisted, pack, current, newest)
+            .and_then(|()| check_terminal_floor(ctx, pack, &terminals))
+        {
             skipped.push(SkippedPack {
                 id: pack.id.clone(),
                 version_code: pack.version_code,
@@ -199,6 +228,22 @@ pub fn plan(
         projected.insert(pack.id.clone(), pack.version_code);
         chosen.push(pack.clone());
     }
+
+    // Keep the final floor defence as well: no selected same-id chain may end
+    // below its persistent floor.
+    chosen.retain(|pack| {
+        let floor = ctx.version_floor.get(&pack.id).copied().unwrap_or(0);
+        if projected.get(&pack.id).copied().unwrap_or(0) < floor {
+            skipped.push(SkippedPack {
+                id: pack.id.clone(),
+                version_code: pack.version_code,
+                reason: Skipped::Downgrade { floor },
+            });
+            false
+        } else {
+            true
+        }
+    });
 
     if chosen.is_empty() {
         Plan::UpToDate { skipped }
@@ -212,11 +257,41 @@ pub fn plan(
     }
 }
 
+// A revision below the floor is useful only as a dependency of an eligible
+// chain that reaches it. Apply this before supersession in the replacement
+// prepass and before mutating the projection during selection. Checking patches
+// too prevents a dead-end branch from hiding a viable alternative.
+fn check_terminal_floor(
+    ctx: &PlanContext,
+    pack: &PackRef,
+    terminals: &HashMap<PackId, HashMap<u64, u64>>,
+) -> Result<(), Skipped> {
+    let floor = ctx.version_floor.get(&pack.id).copied().unwrap_or(0);
+    // A DLC (or mod) is above patches in stack order, so a patch edge
+    // cannot extend it during this transaction. Only base/patch revisions
+    // may use the reachable suffixes computed above.
+    let terminal = if layer_rank(pack.kind) <= layer_rank(PackKind::Patch) {
+        terminals
+            .get(&pack.id)
+            .and_then(|revisions| revisions.get(&pack.version_code))
+            .copied()
+            .unwrap_or(pack.version_code)
+    } else {
+        pack.version_code
+    };
+    if terminal < floor {
+        Err(Skipped::Downgrade { floor })
+    } else {
+        Ok(())
+    }
+}
+
 /// Every rule a single pack has to pass, in the order they are reported.
 ///
 /// `current` is the version the pack's id would be at when it is applied.
 /// `newest` is the highest eligible base/DLC `version_code` for that id; the
-/// pre-pass that computes it passes `None`, so both share exactly these checks.
+/// pre-pass that computes it passes `None`. Both passes also require terminal
+/// floor eligibility through [`check_terminal_floor`].
 fn check(
     manifest: &ChannelManifest,
     ctx: &PlanContext,
@@ -272,21 +347,16 @@ fn check(
             if current != expected {
                 return Err(Skipped::ParentMissing { expected });
             }
-        }
-        _ => {
-            // Two rules that look like one. "Already have it" is equality
-            // against what is really installed. "Never go backwards" is strict
-            // against the persistent floor, which outlives a blacklisted layer
-            // and a `reset` — strict, so re-fetching the version the device is
-            // already on stays possible after a reset, while anything older
-            // stays refused. A publisher rolling back a release produces a
-            // perfectly signed manifest, and this is what stops it.
             if pack.version_code <= current {
                 return Err(Skipped::NotNewer { installed: current });
             }
-            let floor = ctx.version_floor.get(&pack.id).copied().unwrap_or(0);
-            if pack.version_code < floor {
-                return Err(Skipped::Downgrade { floor });
+        }
+        _ => {
+            // A replacement must advance the installed revision. Terminal floor
+            // eligibility allows recovery through an older base and intermediate
+            // patches after reset or blacklisting; final projection is checked too.
+            if pack.version_code <= current {
+                return Err(Skipped::NotNewer { installed: current });
             }
         }
     }
@@ -333,6 +403,220 @@ fn layer_rank(kind: PackKind) -> u8 {
 mod tests {
     use super::*;
     use tpk_format::sign::sha256_hex;
+
+    #[test]
+    fn final_floor_allows_intermediate_patches_but_never_a_low_terminal_revision() {
+        let context = ctx_with_floor("1.0.0", &[("core", 1)], 3);
+        let p2 = pack(PackKind::Patch, 2, Some(1));
+        let p3 = pack(PackKind::Patch, 3, Some(2));
+        let Plan::Apply { packs, .. } = plan(
+            &manifest(vec![p3.clone(), p2.clone()]),
+            &context,
+            &|_, _, _| false,
+        ) else {
+            panic!("the chain must recover to the floor");
+        };
+        assert_eq!(
+            packs.iter().map(|p| p.version_code).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        let below = plan(&manifest(vec![p2.clone()]), &context, &|_, _, _| false);
+        assert!(!below.has_work());
+        assert!(matches!(
+            below.skipped()[0].reason,
+            Skipped::Downgrade { floor: 3 }
+        ));
+        for excluded in 0..3 {
+            let mut terminal = p3.clone();
+            if excluded == 0 {
+                terminal.rollout = 0;
+            }
+            if excluded == 1 {
+                terminal.min_shell = Some("2.0.0".parse().unwrap());
+            }
+            let terminal_hash = terminal.sha256;
+            let result = plan(
+                &manifest(vec![p2.clone(), terminal]),
+                &context,
+                &|hash, _, _| excluded == 2 && *hash == terminal_hash,
+            );
+            assert!(
+                !result.has_work(),
+                "an ineligible terminal must reject the whole chain"
+            );
+        }
+    }
+
+    #[test]
+    fn final_floor_is_per_id_and_can_be_reached_from_an_older_base() {
+        let context = ctx_with_floor("1.0.0", &[], 3);
+        let mut other = pack(PackKind::Base, 1, None);
+        other.id = PackId::parse("other").unwrap();
+        let Plan::Apply { packs, .. } = plan(
+            &manifest(vec![
+                pack(PackKind::Base, 1, None),
+                pack(PackKind::Patch, 2, Some(1)),
+                pack(PackKind::Patch, 3, Some(2)),
+                other,
+            ]),
+            &context,
+            &|_, _, _| false,
+        ) else {
+            panic!("recovery chain should apply");
+        };
+        assert_eq!(packs.len(), 4);
+        let Plan::Apply { packs, .. } = plan(
+            &manifest(vec![pack(PackKind::Base, 1, None), {
+                let mut p = pack(PackKind::Base, 1, None);
+                p.id = PackId::parse("other").unwrap();
+                p
+            }]),
+            &context,
+            &|_, _, _| false,
+        ) else {
+            panic!("other id should still apply");
+        };
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].id.as_str(), "other");
+    }
+
+    #[test]
+    fn a_below_floor_replacement_preserves_the_installed_patch_chain() {
+        let context = ctx_with_floor("1.0.0", &[("core", 1)], 3);
+        let outcome = run(
+            &manifest(vec![
+                pack(PackKind::Base, 2, None),
+                pack(PackKind::Patch, 3, Some(1)),
+            ]),
+            &context,
+        );
+        assert_eq!(codes(&outcome), [3]);
+        assert_eq!(
+            outcome.skipped(),
+            [SkippedPack {
+                id: PackId::parse("core").unwrap(),
+                version_code: 2,
+                reason: Skipped::Downgrade { floor: 3 },
+            }]
+        );
+    }
+
+    #[cfg(not(app_store))]
+    #[test]
+    fn a_below_floor_dlc_cannot_claim_a_patch_suffix_above_it() {
+        let outcome = run(
+            &manifest(vec![
+                pack(PackKind::Dlc, 2, None),
+                pack(PackKind::Patch, 3, Some(1)),
+                pack(PackKind::Patch, 4, Some(2)),
+            ]),
+            &ctx_with_floor("1.0.0", &[("core", 1)], 3),
+        );
+        assert_eq!(codes(&outcome), [3]);
+    }
+
+    #[test]
+    fn an_older_dependency_base_remains_eligible_to_reach_the_floor() {
+        let outcome = run(
+            &manifest(vec![
+                pack(PackKind::Patch, 3, Some(2)),
+                pack(PackKind::Base, 1, None),
+                pack(PackKind::Patch, 2, Some(1)),
+            ]),
+            &ctx_with_floor("1.0.0", &[], 3),
+        );
+        assert_eq!(codes(&outcome), [1, 2, 3]);
+        assert!(outcome.skipped().is_empty());
+    }
+
+    #[test]
+    fn an_unavailable_replacement_terminal_preserves_the_installed_chain() {
+        // The replacement would reach floor 4 via patch 4(parent 2), but that
+        // terminal is unavailable to this device. Patch 3(parent 1) can still
+        // recover the installed chain, including its intermediate revision.
+        for excluded in 0..3 {
+            let mut terminal = pack(PackKind::Patch, 4, Some(2));
+            if excluded == 0 {
+                terminal.rollout = 0;
+            }
+            if excluded == 1 {
+                terminal.min_shell = Some("2.0.0".parse().unwrap());
+            }
+            let outcome = plan(
+                &manifest(vec![
+                    terminal,
+                    pack(PackKind::Base, 2, None),
+                    pack(PackKind::Patch, 3, Some(1)),
+                    pack(PackKind::Patch, 5, Some(3)),
+                ]),
+                &ctx_with_floor("1.0.0", &[("core", 1)], 4),
+                &|_, _, code| excluded == 2 && code == 4,
+            );
+            assert_eq!(codes(&outcome), [3, 5], "exclusion {excluded}");
+            assert!(outcome
+                .skipped()
+                .iter()
+                .any(|p| { p.version_code == 2 && p.reason == Skipped::Downgrade { floor: 4 } }));
+            assert!(!outcome
+                .skipped()
+                .iter()
+                .any(|p| matches!(p.reason, Skipped::Superseded { .. })));
+        }
+    }
+
+    #[test]
+    fn an_unavailable_terminal_rejects_a_fresh_dependency_chain() {
+        for excluded in 0..3 {
+            let mut terminal = pack(PackKind::Patch, 3, Some(2));
+            if excluded == 0 {
+                terminal.rollout = 0;
+            }
+            if excluded == 1 {
+                terminal.max_shell = Some("0.9.0".parse().unwrap());
+            }
+            let outcome = plan(
+                &manifest(vec![
+                    pack(PackKind::Base, 1, None),
+                    pack(PackKind::Patch, 2, Some(1)),
+                    terminal,
+                ]),
+                &ctx_with_floor("1.0.0", &[], 3),
+                &|_, _, code| excluded == 2 && code == 3,
+            );
+            assert!(!outcome.has_work(), "exclusion {excluded}");
+            assert_eq!(outcome.skipped()[0].version_code, 1);
+            assert_eq!(outcome.skipped()[0].reason, Skipped::Downgrade { floor: 3 });
+        }
+    }
+
+    #[test]
+    fn a_valid_replacement_chain_supersedes_the_installed_chain() {
+        let outcome = run(
+            &manifest(vec![
+                pack(PackKind::Base, 2, None),
+                pack(PackKind::Patch, 3, Some(1)),
+                pack(PackKind::Patch, 4, Some(2)),
+            ]),
+            &ctx_with_floor("1.0.0", &[("core", 1)], 4),
+        );
+        assert_eq!(codes(&outcome), [2, 4]);
+        assert_eq!(outcome.skipped()[0].reason, Skipped::Superseded { by: 2 });
+    }
+
+    #[test]
+    fn a_dead_end_patch_does_not_hide_a_branch_that_reaches_the_floor() {
+        let outcome = run(
+            &manifest(vec![
+                pack(PackKind::Base, 1, None),
+                pack(PackKind::Patch, 2, Some(1)),
+                pack(PackKind::Patch, 3, Some(1)),
+                pack(PackKind::Patch, 4, Some(3)),
+            ]),
+            &ctx_with_floor("1.0.0", &[], 4),
+        );
+        assert_eq!(codes(&outcome), [1, 3, 4]);
+        assert_eq!(outcome.skipped()[0].reason, Skipped::Downgrade { floor: 4 });
+    }
 
     fn pack(kind: PackKind, code: u64, parent: Option<u64>) -> PackRef {
         PackRef {
@@ -884,11 +1168,12 @@ mod tests {
         ]);
         let outcome = run(&m, &ctx_with_floor("2.3.0", &[], 2));
         assert!(!outcome.has_work());
-        let reasons: Vec<_> = outcome
+        let mut reasons: Vec<_> = outcome
             .skipped()
             .iter()
             .map(|s| (s.version_code, s.reason.clone()))
             .collect();
+        reasons.sort_by_key(|(code, _)| *code);
         assert_eq!(
             reasons,
             [

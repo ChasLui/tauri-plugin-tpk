@@ -191,6 +191,99 @@ pub struct TpkHandle {
 }
 
 impl TpkHandle {
+    /// Turn Tauri's SPA fallback into an empty 404 for an explicitly deleted asset.
+    ///
+    /// Wire this into each `WebviewWindowBuilder::on_web_resource_request` callback
+    /// **before building the webview**. Save the request URI before passing the
+    /// request to any host callback, then call this method after that callback so
+    /// it filters the final response. Installing the plugin does not wire this hook.
+    ///
+    /// Only the local Tauri origins (`tauri://localhost`, `http://tauri.localhost`,
+    /// and `https://tauri.localhost`) and the exact canonical asset path are checked.
+    /// Ordinary missing routes keep their SPA fallback. The frozen resolver index
+    /// is consulted without IO; a higher layer's full entry restores a deleted path.
+    /// Mobile development requests are left alone because they use the dev server.
+    ///
+    /// Tauri does not call the response hook when core asset resolution fails
+    /// (for example, when no fallback `index.html` exists), so this method cannot
+    /// force a 404 in that case.
+    pub fn filter_web_resource_response(
+        &self,
+        uri: &tauri::http::Uri,
+        response: &mut tauri::http::Response<Cow<'static, [u8]>>,
+    ) {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if tauri::is_dev() {
+            return;
+        }
+
+        let local_origin = matches!(
+            (uri.scheme_str(), uri.authority().map(|a| a.as_str())),
+            (Some("tauri"), Some("localhost")) | (Some("http" | "https"), Some("tauri.localhost"))
+        );
+        if !local_origin {
+            return;
+        }
+        let Some(resolver) = self.shared.resolver() else {
+            return;
+        };
+
+        // Mirror core protocol resolution: remove one literal trailing slash
+        // before decoding, decode once, and map the root to index.html.
+        let path = uri.path().strip_suffix('/').unwrap_or(uri.path());
+        let decoded = percent_encoding::percent_decode(path.as_bytes()).decode_utf8_lossy();
+        let key = if decoded.is_empty() {
+            "index.html"
+        } else {
+            decoded.strip_prefix('/').unwrap_or(&decoded)
+        };
+        let key = AssetKey::from(key);
+        let Some(path) = normalize_asset_key(key.as_ref()) else {
+            return;
+        };
+        if !resolver
+            .index()
+            .lookup(path.as_str())
+            .is_some_and(|loc| loc.op == tpk_format::manifest::Op::Delete)
+        {
+            return;
+        }
+
+        *response.status_mut() = tauri::http::StatusCode::NOT_FOUND;
+        *response.body_mut() = Cow::Borrowed(&[]);
+        // Remove metadata for the discarded entity, retaining CORS and other
+        // security headers that still apply to the empty response.
+        let headers = response.headers_mut();
+        for name in [
+            "content-type",
+            "content-length",
+            "content-encoding",
+            "content-range",
+            "content-language",
+            "content-location",
+            "content-disposition",
+            "content-security-policy",
+            "content-security-policy-report-only",
+            "etag",
+            "last-modified",
+            "expires",
+            "age",
+            "accept-ranges",
+            "transfer-encoding",
+            "trailer",
+            "digest",
+            "content-digest",
+            "repr-digest",
+            "content-md5",
+        ] {
+            headers.remove(name);
+        }
+        headers.insert(
+            tauri::http::header::CACHE_CONTROL,
+            tauri::http::HeaderValue::from_static("no-store"),
+        );
+    }
+
     /// The shared slot the plugin fills in during `setup`.
     pub fn shared(&self) -> &Arc<Shared> {
         &self.shared
@@ -349,6 +442,199 @@ mod tests {
         }
 
         Fixture { _dir: dir, assets }
+    }
+
+    fn spa_response() -> tauri::http::Response<Cow<'static, [u8]>> {
+        tauri::http::Response::builder()
+            .header("content-type", "text/html")
+            .header("content-length", "16")
+            .header("content-encoding", "gzip")
+            .header("content-security-policy", "script-src 'self'")
+            .header("etag", "\"index\"")
+            .header("last-modified", "Wed, 01 Jan 2025 00:00:00 GMT")
+            .header("cache-control", "max-age=3600")
+            .header("access-control-allow-origin", "tauri://localhost")
+            .header("x-content-type-options", "nosniff")
+            .header("cross-origin-resource-policy", "same-origin")
+            .body(Cow::Borrowed(&b"<html>SPA</html>"[..]))
+            .unwrap()
+    }
+
+    fn filter(f: &Fixture, uri: &str, response: &mut tauri::http::Response<Cow<'static, [u8]>>) {
+        TpkHandle {
+            shared: Arc::clone(&f.assets.shared),
+        }
+        .filter_web_resource_response(&uri.parse().unwrap(), response);
+    }
+
+    #[test]
+    fn response_guard_replaces_deleted_spa_and_retains_security_headers() {
+        let f = fixture(&[], &[], &["/removed.txt"]);
+        let mut response = spa_response();
+        filter(&f, "tauri://localhost/removed.txt", &mut response);
+        assert_eq!(response.status(), tauri::http::StatusCode::NOT_FOUND);
+        assert!(response.body().is_empty());
+        for header in [
+            "content-type",
+            "content-length",
+            "content-encoding",
+            "content-security-policy",
+            "etag",
+            "last-modified",
+        ] {
+            assert!(!response.headers().contains_key(header), "{header}");
+        }
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(
+            response.headers()["access-control-allow-origin"],
+            "tauri://localhost"
+        );
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            response.headers()["cross-origin-resource-policy"],
+            "same-origin"
+        );
+    }
+
+    #[test]
+    fn response_guard_matches_core_path_normalization_and_local_origins() {
+        let f = fixture(&[], &[], &["/removed.txt", "/index.html", "/caf\u{e9}.txt"]);
+        for uri in [
+            "tauri://localhost/removed.txt",
+            "tauri://localhost/removed%2Etxt/?query=ignored",
+            "http://tauri.localhost/removed.txt",
+            "https://tauri.localhost/removed.txt",
+            "tauri://localhost/",
+            "tauri://localhost/cafe%CC%81.txt",
+        ] {
+            let mut response = spa_response();
+            filter(&f, uri, &mut response);
+            assert_eq!(
+                response.status(),
+                tauri::http::StatusCode::NOT_FOUND,
+                "{uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn response_guard_preserves_spa_and_does_not_infer_aliases_or_decode_twice() {
+        let f = fixture(
+            &[],
+            &[],
+            &["/removed.txt", "/about.html", "/docs/index.html"],
+        );
+        for uri in [
+            "tauri://localhost/missing.txt",
+            "tauri://localhost/client/route",
+            "tauri://localhost/about",
+            "tauri://localhost/docs/",
+            "tauri://localhost/removed%252Etxt",
+        ] {
+            let mut response = spa_response();
+            let before = spa_response();
+            filter(&f, uri, &mut response);
+            assert_eq!(response.status(), before.status(), "{uri}");
+            assert_eq!(response.headers(), before.headers(), "{uri}");
+            assert_eq!(response.body(), before.body(), "{uri}");
+        }
+    }
+
+    #[test]
+    fn response_guard_uses_platform_asset_key_for_remaining_trailing_slashes() {
+        let f = fixture(&[], &[], &["/removed.txt"]);
+        for uri in [
+            "tauri://localhost/removed.txt%2F",
+            "tauri://localhost/removed.txt//",
+        ] {
+            let mut response = spa_response();
+            filter(&f, uri, &mut response);
+            // Windows AssetKey reconstructs path components, removing remaining
+            // trailing slashes; Unix AssetKey retains them, as core Tauri does.
+            let expected = if cfg!(windows) {
+                tauri::http::StatusCode::NOT_FOUND
+            } else {
+                tauri::http::StatusCode::OK
+            };
+            assert_eq!(response.status(), expected, "{uri}");
+        }
+    }
+
+    #[test]
+    fn response_guard_leaves_external_origins_and_uninitialized_handle_unchanged() {
+        let f = fixture(&[], &[], &["/removed.txt"]);
+        for uri in [
+            "https://example.com/removed.txt",
+            "https://localhost/removed.txt",
+            "tauri://example.com/removed.txt",
+            "https://tauri.localhost.example.com/removed.txt",
+            "https://tauri.localhost:8443/removed.txt",
+            "/removed.txt",
+        ] {
+            let mut response = spa_response();
+            let before = spa_response();
+            filter(&f, uri, &mut response);
+            assert_eq!(response.status(), before.status(), "{uri}");
+            assert_eq!(response.headers(), before.headers(), "{uri}");
+            assert_eq!(response.body(), before.body(), "{uri}");
+        }
+        let f = fixture(&[], &[], &[]);
+        let mut response = spa_response();
+        filter(&f, "tauri://localhost/removed.txt", &mut response);
+        assert_eq!(response.headers(), spa_response().headers());
+        assert_eq!(response.body(), spa_response().body());
+        assert_eq!(response.status(), tauri::http::StatusCode::OK);
+    }
+
+    #[test]
+    fn response_guard_uses_winning_operation_when_a_higher_layer_restores_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SecretKey::generate();
+        let trust = Arc::new(
+            TrustStore::new(&[TrustedKey {
+                key: key.public_key_base64(),
+                epoch: 1,
+            }])
+            .unwrap(),
+        );
+        let mut index = IndexBuilder::new(trust, 1);
+        for (version, delete) in [(1, true), (2, false)] {
+            let path = dir.path().join(format!("{version}.tpk"));
+            let mut builder = PackBuilder::new(
+                PackKind::Base,
+                PackId::parse("core").unwrap(),
+                "1.0.0".parse().unwrap(),
+                version,
+                "2026-09-11T15:00:00Z",
+            );
+            if delete {
+                builder.add_delete("/removed.txt").unwrap();
+            } else {
+                builder.add_full("/removed.txt", b"restored").unwrap();
+            }
+            let summary = builder.build(&key, &path).unwrap();
+            index.push_layer(&LayerSpec {
+                path,
+                file_sha256: summary.file_sha256,
+            });
+        }
+        let resolver = Arc::new(index.build(0, Box::new(NoMaterialized)));
+        assert!(resolver.failed_layers().is_empty());
+        assert_eq!(
+            resolver.index().lookup("/removed.txt").unwrap().op,
+            tpk_format::manifest::Op::Full
+        );
+        let shared = Arc::new(Shared::default());
+        shared.set_resolver(resolver);
+        let handle = TpkHandle { shared };
+        let mut response = spa_response();
+        handle.filter_web_resource_response(
+            &"tauri://localhost/removed.txt".parse().unwrap(),
+            &mut response,
+        );
+        assert_eq!(response.status(), tauri::http::StatusCode::OK);
+        assert_eq!(response.headers(), spa_response().headers());
+        assert_eq!(response.body(), spa_response().body());
     }
 
     /// `CspHash` is `#[non_exhaustive]`, so the wildcard arm is required: a new

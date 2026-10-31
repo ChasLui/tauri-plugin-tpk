@@ -14,6 +14,10 @@ use crate::error::{FormatError, Result};
 use crate::manifest::{Encoding, Entry, Op, PackManifest, Sha256Hex};
 use crate::sign::{sha256_hex, verify_sha256, TrustStore};
 
+#[path = "zip_structure.rs"]
+mod zip_structure;
+use zip_structure::CheckedReader;
+
 /// Container-relative name of the manifest.
 pub const MANIFEST_NAME: &str = "tpk-manifest.json";
 /// Container-relative name of the detached manifest signature.
@@ -36,7 +40,7 @@ const PREALLOC_CAP: u64 = 8 * 1024 * 1024;
 ///
 /// The only thing you can do with one is [`verify`](Self::verify).
 pub struct UnverifiedPack {
-    archive: zip::ZipArchive<File>,
+    archive: zip::ZipArchive<CheckedReader>,
     manifest_bytes: Vec<u8>,
     manifest_sha256: Sha256Hex,
     signature: Option<String>,
@@ -55,8 +59,10 @@ impl UnverifiedPack {
     /// Open a `.tpk` file and read its manifest bytes.
     ///
     /// Structural checks that do not need a signature happen here: the entry
-    /// name whitelist, duplicate names, the entry count ceiling, and a non-empty
-    /// archive comment.
+    /// name whitelist, duplicate names, the raw entry count ceiling, and an
+    /// empty archive comment. Before constructing the ZIP archive, central
+    /// directory metadata (including the ZIP64 end record) is limited to 16 MiB.
+    /// The footer must end at EOF and its directory offsets must be absolute.
     ///
     /// # Errors
     ///
@@ -68,8 +74,7 @@ impl UnverifiedPack {
     }
 
     fn from_reader(reader: File) -> Result<Self> {
-        let mut archive = zip::ZipArchive::new(reader)
-            .map_err(|e| FormatError::Spec(format!("not a readable ZIP: {e}")))?;
+        let mut archive = zip_structure::open(reader)?;
 
         if !archive.comment().is_empty() {
             return Err(FormatError::Spec(
@@ -83,8 +88,8 @@ impl UnverifiedPack {
             )));
         }
 
-        // ZIP permits duplicate names; `by_name` then silently picks one of
-        // them, which is the classic signed-one-thing/read-another split.
+        // The raw precheck above is authoritative: zip deduplicates names.
+        // Keep these decoded-name and local-header checks as defense in depth.
         let mut names = std::collections::HashSet::new();
         for i in 0..archive.len() {
             let name = archive
@@ -222,7 +227,7 @@ impl UnverifiedPack {
 
 /// A pack whose manifest signature verified against a trusted key.
 pub struct VerifiedPack {
-    archive: zip::ZipArchive<File>,
+    archive: zip::ZipArchive<CheckedReader>,
     manifest: PackManifest,
     manifest_sha256: Sha256Hex,
 }

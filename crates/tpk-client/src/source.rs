@@ -109,6 +109,9 @@ pub struct HttpChannelSource {
 /// Ceiling on a channel manifest. Generous for a document listing packs.
 pub const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Ceiling on a detached minisign document, independently of the manifest budget.
+pub const MAX_SIGNATURE_BYTES: u64 = 64 * 1024;
+
 impl HttpChannelSource {
     /// Point at a manifest URL template.
     pub fn new(template: impl Into<String>) -> Self {
@@ -140,14 +143,14 @@ impl HttpChannelSource {
 impl ChannelSource for HttpChannelSource {
     async fn fetch(&self, ctx: &FetchContext) -> Result<SignedBytes> {
         let url = expand_url(&self.template, ctx)?;
-        let client = reqwest::Client::new();
+        let client = crate::runtime_http_client()?;
 
         let body = get_bounded(&client, &url, &self.headers, self.max_bytes).await?;
         let signature = get_bounded(
             &client,
             &format!("{url}.minisig"),
             &self.headers,
-            MAX_MANIFEST_BYTES,
+            MAX_SIGNATURE_BYTES,
         )
         .await?;
 
@@ -169,10 +172,10 @@ async fn get_bounded(
     for (name, value) in headers {
         request = request.header(name, value);
     }
-    let response = request
+    let mut response = request
         .send()
         .await
-        .map_err(|e| ClientError::Network(format!("{}: {e}", crate::error::redact(url))))?;
+        .map_err(crate::transport::network_error)?;
 
     let status = response.status();
     if !status.is_success() {
@@ -190,22 +193,96 @@ async fn get_bounded(
         }
     }
 
-    let bytes = response
-        .bytes()
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|e| ClientError::Network(e.to_string()))?;
-    if bytes.len() as u64 > max {
-        return Err(ClientError::TooLarge {
-            what: crate::error::redact(url),
-            limit: max,
-        });
+        .map_err(crate::transport::network_error)?
+    {
+        if chunk.len() as u64 > max.saturating_sub(bytes.len() as u64) {
+            return Err(ClientError::TooLarge {
+                what: crate::error::redact(url),
+                limit: max,
+            });
+        }
+        bytes.extend_from_slice(&chunk);
     }
-    Ok(bytes.to_vec())
+    Ok(bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bounded_reads_enforce_advertised_and_streaming_budgets() {
+        let cases = [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\n123456789".to_vec(),
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n123456789".to_vec(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n1234\r\n5\r\n56789\r\n0\r\n\r\n".to_vec(),
+        ];
+        for response in cases {
+            let (url, server) = crate::test_http::serve(response);
+            let error = get_bounded(&crate::test_http::client(), &url, &HashMap::new(), 8)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, ClientError::TooLarge { limit: 8, .. }));
+            assert!(!error.to_string().contains("secret"));
+            server.join().unwrap();
+        }
+        let (url, server) = crate::test_http::serve(
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n12345678".to_vec(),
+        );
+        assert_eq!(
+            get_bounded(&crate::test_http::client(), &url, &HashMap::new(), 8)
+                .await
+                .unwrap(),
+            b"12345678"
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn manifest_budget_is_four_mebibytes_without_content_length() {
+        let mut response = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+        response.resize(response.len() + MAX_MANIFEST_BYTES as usize + 1, b'x');
+        let (url, server) = crate::test_http::serve(response);
+        assert!(matches!(
+            get_bounded(
+                &crate::test_http::client(),
+                &url,
+                &HashMap::new(),
+                MAX_MANIFEST_BYTES
+            )
+            .await,
+            Err(ClientError::TooLarge {
+                limit: MAX_MANIFEST_BYTES,
+                ..
+            })
+        ));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn signature_has_its_own_small_budget() {
+        let mut response = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+        response.resize(response.len() + MAX_SIGNATURE_BYTES as usize + 1, b'x');
+        let (url, server) = crate::test_http::serve(response);
+        assert!(matches!(
+            get_bounded(
+                &crate::test_http::client(),
+                &url,
+                &HashMap::new(),
+                MAX_SIGNATURE_BYTES
+            )
+            .await,
+            Err(ClientError::TooLarge {
+                limit: MAX_SIGNATURE_BYTES,
+                ..
+            })
+        ));
+        server.join().unwrap();
+    }
 
     fn ctx() -> FetchContext {
         FetchContext {

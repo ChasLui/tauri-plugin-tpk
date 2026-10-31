@@ -193,6 +193,16 @@ fn setup<R: Runtime>(
 
     record_layer_failures(&mut store, resolver.failed_layers());
 
+    let runtime_layers: Vec<tpk_resolve::LayerSpec> = resolver
+        .index()
+        .layers()
+        .iter()
+        .map(|layer| tpk_resolve::LayerSpec {
+            path: layer.path.clone(),
+            file_sha256: layer.file_sha256,
+        })
+        .collect();
+    store.retain_runtime_layers(&runtime_layers);
     let resolver = Arc::new(resolver);
 
     // The OS may have purged the delta results. Check and rebuild off the
@@ -208,18 +218,19 @@ fn setup<R: Runtime>(
             if !tpk_store::missing_materialized(&resolver, &materialized_dir) {
                 return;
             }
-            let specs: Vec<tpk_resolve::LayerSpec> = resolver
-                .index()
-                .layers()
-                .iter()
-                .map(|l| tpk_resolve::LayerSpec {
-                    path: l.path.clone(),
-                    file_sha256: l.file_sha256,
-                })
-                .collect();
-            match tpk_store::materialize_stack(&specs, &trust, min_key_epoch, &materialized_dir) {
-                Ok(n) => log::info!("[tpk] rebuilt {n} purged delta result(s)"),
-                Err(e) => log::error!("[tpk] could not rebuild delta results: {e}"),
+            let recovery = tpk_store::materialize_stack_best_effort(
+                &runtime_layers,
+                &trust,
+                min_key_epoch,
+                &materialized_dir,
+            );
+            log::info!("[tpk] rebuilt {} purged delta result(s)", recovery.written);
+            for failure in recovery.failures {
+                log::error!(
+                    "[tpk] could not rebuild delta results for {}: {}",
+                    failure.file_sha256.to_hex(),
+                    failure.error,
+                );
             }
         });
     }

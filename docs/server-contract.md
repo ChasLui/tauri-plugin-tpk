@@ -107,6 +107,9 @@ stateless, and unaffected by moving the repository or rebuilding CI. A counter i
 a file will eventually be reset by someone.
 
 Equal watermarks are accepted, so republishing an identical manifest is safe.
+The signed `channel` must exactly match the configured channel before the client
+updates either its watermark or key-epoch floor. Sharing a signing key between
+channels does not make their manifests interchangeable.
 
 ## `key_epoch`
 

@@ -52,9 +52,24 @@ A tombstone is not the same as a missing entry:
 | Lookup result | Behaviour |
 |---|---|
 | Winning entry is `full`/`delta` | Serve it |
-| Winning entry is `delete` | 404. Does **not** fall through to embedded |
+| Winning entry is `delete` | Hide the deleted payload; return 404 with the webview response guard |
 | No entry in any layer | Fall through to embedded |
 | Layer present but unreadable | Record the failure, fall through to embedded |
+
+Tauri's `Assets` interface only returns bytes or a miss. Its built-in protocol
+can turn that miss into `200 index.html` for SPA routing, even when a tombstone
+correctly hides the original embedded file. To preserve a deleted asset's HTTP
+404, call `TpkHandle::filter_web_resource_response` from each app webview's
+`on_web_resource_request` callback before building the webview. The example
+wires this hook while preserving the configured windows.
+
+Apply the guard **after** any existing host response callback, in one closure;
+setting the builder callback twice replaces the first one. The guard changes
+only exact local app-origin paths whose winning entry is a deletion. Missing
+SPA routes, external resources, and paths restored by a higher layer stay
+unchanged. Mobile dev-server proxy requests are bypassed. If Tauri cannot resolve
+any fallback asset, it returns its own error before calling this hook; keep a
+usable embedded index as required by the rollback contract.
 
 ## The index
 
@@ -109,7 +124,10 @@ installed — the layers in the stack right now. How far back an id may go is
 `version_floor` in `state.json`: the highest `version_code` that id ever
 committed, raised at commit, never lowered, kept across a `reset`. Only a
 strictly older `version_code` is a downgrade; equality is a reinstall, which is
-what lets a reset device re-fetch the version it was already running.
+what lets a reset device re-fetch the version it was already running. Planning
+and staging check the final version of each updated id against this floor.
+An older intermediate patch may be needed to reach that final version, but a
+chain that ends below the floor is not activated.
 
 A blacklisted layer does not count as installed. One predicate decides that, and
 the resolver's stack, the inherit filter at stage time and the planner all use

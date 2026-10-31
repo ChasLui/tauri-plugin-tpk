@@ -31,6 +31,10 @@ pub enum StoreError {
     #[error("blacklisted: {0}")]
     Blacklisted(String),
 
+    /// A final revision would activate content below the committed version floor.
+    #[error("version floor: {0}")]
+    Version(String),
+
     /// Filesystem failure.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -49,6 +53,7 @@ impl StoreError {
             Self::Delta(_) => ErrorCode::Delta,
             Self::Parent(_) => ErrorCode::Parent,
             Self::Shell(_) => ErrorCode::Shell,
+            Self::Version(_) => ErrorCode::Policy,
             Self::Blacklisted(_) => ErrorCode::Blacklist,
             Self::Io(_) => ErrorCode::Io,
             Self::Format(e) => e.code(),

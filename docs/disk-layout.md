@@ -37,9 +37,20 @@ stored once.
 
 ## Atomicity
 
-`state.json` is written through a temp file, `fsync`, `rename`, then an `fsync`
-of the parent directory. Without that last step the rename can be reordered past
-a power loss on several filesystems and the file comes back empty.
+`state.json` is written through an exclusively created temp file, `fsync`,
+`rename`, then a parent-directory `fsync` on Unix. Existing temp paths are never
+followed or truncated. Unix directory synchronization errors are returned to the
+caller. Other platforms sync the file and atomically rename it; the standard
+library does not provide a portable directory flush there, so directory-entry
+survival after power loss is not guaranteed.
+
+State transitions publish their candidate in memory after the state write
+succeeds. A failed write leaves the trial retryable. A later blacklist write
+failure preserves the committed state and is retried by subsequent operations.
+Rollback saves new blacklist condemnations before discarding the booting revision,
+so a restart between the two writes cannot lose the failed pack's identity.
+Staging flushes the layer and materialized directories before publishing state,
+including when it reuses resources left by a previous failed write.
 
 Downloads land as `.part` in the cache root and are renamed to `<sha256>.tpk`
 there once size and hash match. They are never renamed across roots into
@@ -58,7 +69,9 @@ first thing the system reclaims.
 
 So a missing delta result is ordinary. When `setup` finds one, a background
 thread rebuilds it from the layer pool, and until then that path falls back to
-the embedded assets; staging also repairs the results it builds on. Nothing in
+the embedded assets. Recovery continues after a layer fails so later independent
+packs can still recover; staging requires the results it builds on to be
+materialized successfully before publishing a revision. Nothing in
 the durable root is ever assumed to be reconstructible from the cache root, and
 nothing in the cache root is ever assumed to still be there.
 
@@ -101,11 +114,13 @@ phone should not be handed a release already known to be broken.
 
 ## Garbage collection
 
-`Store::gc()` removes layer files no staged, booting or committed revision
-refers to. It runs after `notifyReady()` successfully commits a booting
-revision, and after `reset()`. Layers orphaned by a rollback or by a staged
-revision that was dropped stay on disk until the next successful commit frees
-them. A failed collection after a commit is only logged.
+`Store::gc()` retains files referenced by staged, booting and committed
+revisions, plus layer files and delta results pinned by the current process's
+frozen resolver. It runs after a successful `notifyReady()` and after `reset()`.
+Reset clears the persistent revisions but keeps resources the running WebView
+still needs. Runtime pins are not persisted; after the next cold start, a
+collection can reclaim those old files. A failed collection after a commit is
+only logged.
 
 The blacklist is capped at 256 entries; the oldest are dropped first. A device
 that has seen more than 256 bad releases has a different problem.

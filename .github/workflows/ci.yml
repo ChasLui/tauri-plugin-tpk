@@ -157,6 +157,9 @@ jobs:
         working-directory: packages/tauri-plugin-tpk-api
         run: pnpm build
 
+      - name: Example readiness and retry tests
+        run: node --test examples/shell-app/smoke.test.mjs
+
   msrv:
     name: MSRV (1.88)
     runs-on: ubuntu-latest

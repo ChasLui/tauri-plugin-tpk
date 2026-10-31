@@ -284,7 +284,9 @@ fn generate_install_id() -> String {
 ///
 /// # Errors
 ///
-/// Returns [`StoreError::Io`] if any step fails.
+/// Returns [`StoreError::Io`] if any step fails. Unix also syncs the parent
+/// directory and propagates its errors. Other platforms sync file contents;
+/// Rust does not expose a portable directory flush there.
 pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value).map_err(|e| StoreError::State(e.to_string()))?;
     atomic_write(path, &bytes)
@@ -297,7 +299,9 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns [`StoreError::Io`] if any step fails.
+/// Returns [`StoreError::Io`] if any step fails. Unix also syncs the parent
+/// directory and propagates its errors. Other platforms sync file contents;
+/// Rust does not expose a portable directory flush there.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     write_via_temp(path, bytes, false)
 }
@@ -316,7 +320,7 @@ pub(crate) const TEMP_MARKER: &str = ".tmp.";
 
 fn write_via_temp(path: &Path, bytes: &[u8], content_addressed: bool) -> Result<()> {
     use std::io::{Read as _, Write as _};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::AtomicU64;
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -329,16 +333,13 @@ fn write_via_temp(path: &Path, bytes: &[u8], content_addressed: bool) -> Result<
         .file_name()
         .ok_or_else(|| StoreError::State(format!("{} has no file name", path.display())))?
         .to_string_lossy();
-    let tmp = parent.join(format!(
-        "{file_name}{TEMP_MARKER}{}.{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
+    let (tmp, mut file) = create_temp_file(parent, &file_name, &COUNTER)?;
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error.into());
     }
+    drop(file);
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         let same_content = content_addressed
@@ -355,9 +356,57 @@ fn write_via_temp(path: &Path, bytes: &[u8], content_addressed: bool) -> Result<
     }
 
     // Durability of the rename itself, not just of the bytes.
-    if let Ok(dir) = std::fs::File::open(parent) {
-        let _ = dir.sync_all();
+    sync_parent(parent)?;
+    Ok(())
+}
+
+fn create_temp_file(
+    parent: &Path,
+    file_name: &str,
+    counter: &std::sync::atomic::AtomicU64,
+) -> Result<(std::path::PathBuf, std::fs::File)> {
+    use std::sync::atomic::Ordering;
+    loop {
+        let tmp = parent.join(format!(
+            "{file_name}{TEMP_MARKER}{}.{}",
+            std::process::id(),
+            counter.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => return Ok((tmp, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
     }
+}
+
+// Unix permits directory handles to be fsynced (including APFS on Apple).
+// Windows has no portable std directory flush: File::sync_all maps to
+// FlushFileBuffers, which does not support directory handles. File contents
+// are still synced before rename there; do not disguise Unix errors as success.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FAIL_PARENT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static FAIL_PARENT_SYNC_AT: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn sync_parent(parent: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FAIL_PARENT_SYNC.get()
+        || FAIL_PARENT_SYNC_AT.with(|path| path.borrow().as_deref() == Some(parent))
+    {
+        return Err(std::io::Error::other(
+            "injected parent directory sync failure",
+        ));
+    }
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = parent;
     Ok(())
 }
 
@@ -375,6 +424,48 @@ mod tests {
             size: 1234,
             mtime_ns: 0,
         }
+    }
+
+    #[test]
+    fn parent_sync_failure_is_returned_after_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        FAIL_PARENT_SYNC.set(true);
+        let result = atomic_write(&path, b"published bytes");
+        FAIL_PARENT_SYNC.set(false);
+        assert!(matches!(result, Err(StoreError::Io(_))));
+        assert_eq!(std::fs::read(path).unwrap(), b"published bytes");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn exclusive_temp_creation_skips_existing_files_and_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"do not truncate").unwrap();
+        let prefix = format!("state.json{TEMP_MARKER}{}", std::process::id());
+        let symlink = dir.path().join(format!("{prefix}.0"));
+        std::os::unix::fs::symlink(&victim, &symlink).unwrap();
+        let occupied = dir.path().join(format!("{prefix}.1"));
+        std::fs::write(&occupied, b"other writer").unwrap();
+        let counter = std::sync::atomic::AtomicU64::new(0);
+        let (path, mut file) = create_temp_file(dir.path(), "state.json", &counter).unwrap();
+        use std::io::Write;
+        file.write_all(b"new state").unwrap();
+        assert_eq!(path, dir.path().join(format!("{prefix}.2")));
+        assert_eq!(std::fs::read(&victim).unwrap(), b"do not truncate");
+        assert_eq!(std::fs::read(&occupied).unwrap(), b"other writer");
+        assert!(std::fs::symlink_metadata(symlink)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn parent_directory_open_errors_are_not_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(sync_parent(&dir.path().join("missing")).is_err());
     }
 
     #[test]

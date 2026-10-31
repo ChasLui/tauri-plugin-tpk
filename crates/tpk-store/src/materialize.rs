@@ -194,6 +194,48 @@ pub fn materialize_stack(
     Ok(written)
 }
 
+/// A layer that could not be repaired during best-effort recovery.
+#[derive(Debug)]
+pub struct MaterializeFailure {
+    /// Content hash of the failing pack.
+    pub file_sha256: Sha256Hex,
+    /// Verification, reconstruction, or persistence failure.
+    pub error: StoreError,
+}
+
+/// Results of repairing a stack without stopping at the first failed layer.
+#[derive(Debug, Default)]
+pub struct MaterializeRecovery {
+    /// Number of newly reconstructed results in successfully repaired layers.
+    pub written: usize,
+    /// Failures in stack order, for logging or later retry.
+    pub failures: Vec<MaterializeFailure>,
+}
+
+/// Recover a purged cache, continuing through independent later layers.
+///
+/// A layer still resolves its bases against the preceding stack, so missing
+/// dependencies fail rather than being reconstructed against unrelated bytes.
+/// Use strict [`materialize_stack`] when staging a transaction.
+pub fn materialize_stack_best_effort(
+    specs: &[LayerSpec],
+    trust: &Arc<TrustStore>,
+    min_key_epoch: u32,
+    out_dir: &Path,
+) -> MaterializeRecovery {
+    let mut recovery = MaterializeRecovery::default();
+    for (i, spec) in specs.iter().enumerate() {
+        match materialize_layer(spec, &specs[..i], trust, min_key_epoch, out_dir) {
+            Ok(written) => recovery.written += written,
+            Err(error) => recovery.failures.push(MaterializeFailure {
+                file_sha256: spec.file_sha256,
+                error,
+            }),
+        }
+    }
+    recovery
+}
+
 /// Whether any delta entry in the resolver's layers lacks a valid result in `dir`.
 ///
 /// Checks content hashes and stops at the first missing or corrupt result. The
