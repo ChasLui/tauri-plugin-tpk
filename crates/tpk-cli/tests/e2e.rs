@@ -766,11 +766,11 @@ fn tamper_manifest(from: &Path, to: &Path, edit: impl Fn(&mut serde_json::Value)
     use std::io::{Read, Write};
     let mut src = zip::ZipArchive::new(std::fs::File::open(from).unwrap()).unwrap();
     let mut dst = zip::ZipWriter::new(std::fs::File::create(to).unwrap());
-    let opts: zip::write::FileOptions<'_, ()> =
+    let opts: zip::write::SimpleFileOptions =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
     for i in 0..src.len() {
         let mut entry = src.by_index(i).unwrap();
-        let name = entry.name().to_string();
+        let name = entry.name().unwrap().into_owned();
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes).unwrap();
         if name == "tpk-manifest.json" {

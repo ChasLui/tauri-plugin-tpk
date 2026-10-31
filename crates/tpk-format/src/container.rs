@@ -96,7 +96,8 @@ impl UnverifiedPack {
                 .by_index_raw(i)
                 .map_err(|e| FormatError::Spec(format!("unreadable entry {i}: {e}")))?
                 .name()
-                .to_string();
+                .map_err(|e| FormatError::Spec(format!("unreadable entry name {i}: {e}")))?
+                .into_owned();
             if !is_allowed_entry_name(&name) {
                 return Err(FormatError::Spec(format!(
                     "illegal container entry {name:?}"
@@ -111,7 +112,7 @@ impl UnverifiedPack {
 
         let manifest_bytes = read_bounded_entry(&mut archive, MANIFEST_NAME, MAX_MANIFEST_BYTES)?;
         let manifest_sha256 = sha256_hex(&manifest_bytes);
-        let signature = if archive.file_names().any(|name| name == MANIFEST_SIG_NAME) {
+        let signature = if names.contains(MANIFEST_SIG_NAME) {
             let bytes = read_bounded_entry(&mut archive, MANIFEST_SIG_NAME, MAX_SIGNATURE_BYTES)?;
             Some(
                 String::from_utf8(bytes)
@@ -181,7 +182,8 @@ impl UnverifiedPack {
             let name = self
                 .archive
                 .name_for_index(i)
-                .ok_or_else(|| FormatError::Spec(format!("unreadable entry {i}")))?;
+                .ok_or_else(|| FormatError::Spec(format!("unreadable entry {i}")))?
+                .map_err(|e| FormatError::Spec(format!("unreadable entry name {i}: {e}")))?;
             if name.starts_with("blobs/") {
                 present.insert(name.to_string());
             }

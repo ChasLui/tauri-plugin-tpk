@@ -346,7 +346,7 @@ pub fn compressed_size(bytes: &[u8]) -> Result<usize> {
 
 /// Fixed timestamp, fixed host system and no extra fields, so two runs produce
 /// identical bytes — including two runs on different operating systems.
-fn deterministic_options() -> zip::write::FileOptions<'static, ()> {
+fn deterministic_options() -> zip::write::SimpleFileOptions {
     zip::write::FileOptions::default()
         .compression_method(zip::CompressionMethod::Stored)
         .last_modified_time(
