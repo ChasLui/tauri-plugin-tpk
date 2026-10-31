@@ -205,8 +205,8 @@ fn malformed_directory_cannot_fall_back_to_unchecked_footer() {
     let start = u32::from_le_bytes(bytes[end + 16..end + 20].try_into().unwrap()) as usize;
     let alternate_directory = bytes[start..end].to_vec();
     bytes.truncate(end);
-    // The TLV is bounded but zip cannot decode its truncated ZIP64 size.
-    // Its fallback can find an otherwise valid directory inside the comment.
+    // The TLV is bounded but contains a truncated ZIP64 size. An otherwise
+    // valid directory inside its comment must not rescue the malformed one.
     bytes[start + 20..start + 24].copy_from_slice(&u32::MAX.to_le_bytes());
     bytes[start + 30..start + 32].copy_from_slice(&5u16.to_le_bytes());
     bytes[start + 32..start + 34]
@@ -217,13 +217,8 @@ fn malformed_directory_cannot_fall_back_to_unchecked_footer() {
     footer(&mut bytes, 1, u32::MAX - 1, alternate_start);
     let size = (bytes.len() - start) as u32;
     footer(&mut bytes, 1, size, start as u32);
-    assert_eq!(
-        zip::ZipArchive::new(std::io::Cursor::new(&bytes))
-            .unwrap()
-            .len(),
-        1
-    );
-    // zip preserves the first parse error when our guard blocks fallback.
+    // Check our rejection regardless of whether zip itself attempts recovery;
+    // newer releases reject the truncated ZIP64 field without falling back.
     rejection(&bytes, "not a readable ZIP");
 }
 
