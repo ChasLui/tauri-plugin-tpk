@@ -1,3 +1,7 @@
+# This example is standalone, including when the repository is nested inside
+# another checkout (for example, a Delta worktree).
+[workspace]
+
 [package]
 name = "tpk-example"
 version = "0.1.0"

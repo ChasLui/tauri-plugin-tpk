@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Runtime};
 use tpk_client::{
     download::{download_pack, prune_parts, DownloadRequest},
-    verify_channel, ChannelSource, FetchContext, HttpChannelSource, Plan, PlanContext,
+    runtime_http_client, verify_channel_for, ChannelSource, FetchContext, HttpChannelSource, Plan,
+    PlanContext,
 };
 use tpk_format::channel::ChannelManifest;
 use tpk_format::error::ErrorCode;
@@ -46,16 +47,14 @@ pub struct TpkState {
     shared: Arc<Shared>,
     source: HttpChannelSource,
     shell_version: semver::Version,
-    /// The most recent plan, so `download` does not have to poll again.
-    ///
-    /// One slot, last writer wins. A launch auto-check and a frontend `check`
-    /// can therefore overwrite each other, and a `download` may stage the plan
-    /// from whichever check finished last rather than the one whose result the
-    /// caller saw. Both plans come from a signed manifest for the same channel
-    /// and every pack is verified again at stage, so the worst case is a
-    /// different-but-valid revision, not an unchecked one. Known; not fixed
-    /// here, because a per-caller plan token changes the command signatures.
+    /// Serializes checks, downloads and resets, including launch automation.
+    /// A reset waits for the active operation before clearing its result.
+    operation: tokio::sync::Mutex<()>,
+    /// The last checked plan. Read and published while `operation` is held;
+    /// a successful stage consumes it so queued downloads do not repeat it.
     pending: Mutex<Option<(ChannelManifest, Plan)>>,
+    #[cfg(test)]
+    download_client: Option<reqwest::Client>,
     failed_layers: Vec<String>,
     rolled_back: Option<String>,
     unsafe_capabilities: Vec<String>,
@@ -106,7 +105,10 @@ impl TpkState {
             shared: parts.shared,
             source,
             shell_version: parts.shell_version,
+            operation: tokio::sync::Mutex::new(()),
             pending: Mutex::new(None),
+            #[cfg(test)]
+            download_client: None,
             failed_layers: parts.failed_layers,
             rolled_back: parts.rolled_back,
             unsafe_capabilities: parts.unsafe_capabilities,
@@ -121,6 +123,11 @@ impl TpkState {
 
     /// Poll the channel and work out what applies.
     pub(crate) async fn check<R: Runtime>(&self, app: &AppHandle<R>) -> Result<CheckOutcome> {
+        let _operation = self.operation.lock().await;
+        self.check_locked(app).await
+    }
+
+    async fn check_locked<R: Runtime>(&self, app: &AppHandle<R>) -> Result<CheckOutcome> {
         let (floor, min_epoch, install_id, installed, version_floor, degraded, rollbacks) = {
             let store = self.lock_store()?;
             (
@@ -152,24 +159,16 @@ impl TpkState {
             .fetch(&ctx)
             .await
             .map_err(|e| self.fail(app, Error::Client(e)))?;
-        let manifest = verify_channel(&signed, &self.trust, min_epoch, floor)
-            .map_err(|e| self.fail(app, Error::Client(e)))?;
+        let manifest =
+            verify_channel_for(&signed, &self.trust, min_epoch, floor, &self.config.channel)
+                .map_err(|e| self.fail(app, Error::Client(e)))?;
 
         // Advance both monotonic floors before planning: even a manifest that
         // turns out to offer nothing still proves this channel has reached that
         // watermark and that generation of key.
         let saved = {
             let mut store = self.lock_store()?;
-            store
-                .state_mut()
-                .observe_watermark(&self.config.channel, manifest.watermark);
-            let epoch = store.state().min_key_epoch.max(manifest.key_epoch);
-            store.state_mut().min_key_epoch = epoch;
-            // The channel answered and verified, so whatever failed before it is
-            // no longer the state of play. Folded into the write below rather
-            // than taking a second one.
-            store.state_mut().last_error = None;
-            store.save()
+            store.observe_channel(&self.config.channel, manifest.watermark, manifest.key_epoch)
         };
         // Not a bare `?`: a failed state write is a failure like any other and
         // owes the frontend an event. The guard is dropped first, because
@@ -211,17 +210,22 @@ impl TpkState {
 
     /// Fetch and stage whatever the last check found.
     pub(crate) async fn download<R: Runtime>(&self, app: &AppHandle<R>) -> Result<DownloadOutcome> {
+        let _operation = self.operation.lock().await;
+        self.download_locked(app).await
+    }
+
+    async fn download_locked<R: Runtime>(&self, app: &AppHandle<R>) -> Result<DownloadOutcome> {
         let pending = self
             .pending
             .lock()
             .map_err(|_| Error::NotInitialized)?
             .clone();
-        let (_, plan) = match pending {
+        let (manifest, plan) = match pending {
             Some(pair) => pair,
             None => {
                 // Nothing planned yet; poll first so a caller can just invoke
                 // download() on its own.
-                self.check(app).await?;
+                self.check_locked(app).await?;
                 self.pending
                     .lock()
                     .map_err(|_| Error::NotInitialized)?
@@ -245,7 +249,12 @@ impl TpkState {
         // anything not in this plan is dead weight.
         prune_downloads(&tmp_dir, &packs);
 
-        let client = reqwest::Client::new();
+        let client = match runtime_http_client() {
+            Ok(client) => client,
+            Err(error) => return Ok(self.failed_download(app, Error::Client(error))),
+        };
+        #[cfg(test)]
+        let client = self.download_client.clone().unwrap_or(client);
         let count = packs.len();
         let mut downloaded = Vec::with_capacity(count);
         let mut finished = RemoveOnDrop::default();
@@ -299,6 +308,12 @@ impl TpkState {
             crate::exclude_from_backup(&dir);
         }
 
+        *self.pending.lock().map_err(|_| Error::NotInitialized)? = Some((
+            manifest,
+            Plan::UpToDate {
+                skipped: Vec::new(),
+            },
+        ));
         events::emit_state(app, "staged", Some(&rev));
         Ok(DownloadOutcome::Staged {
             rev,
@@ -321,9 +336,10 @@ impl TpkState {
         if !self.config.auto_check_on_launch {
             return;
         }
-        match self.check(app).await {
+        let _operation = self.operation.lock().await;
+        match self.check_locked(app).await {
             Ok(CheckOutcome::Available { .. }) if self.config.auto_download => {
-                if let Err(e) = self.download(app).await {
+                if let Err(e) = self.download_locked(app).await {
                     log::warn!("[tpk] the automatic download could not run: {e}");
                 }
             }
@@ -384,11 +400,12 @@ impl TpkState {
     }
 
     /// Forget downloaded content.
-    pub(crate) fn reset<R: Runtime>(
+    pub(crate) async fn reset<R: Runtime>(
         &self,
         app: &AppHandle<R>,
         options: ResetOptions,
     ) -> Result<Status> {
+        let _operation = self.operation.lock().await;
         {
             let mut store = self.lock_store()?;
             store.reset(options.clear_blacklist)?;
@@ -694,6 +711,22 @@ mod tests {
         TpkState,
         tauri::App<tauri::test::MockRuntime>,
     ) {
+        let (state, app, errors) = download_world(layout, key, packs);
+        let outcome = tauri::async_runtime::block_on(state.download(app.handle())).unwrap();
+        let errors = errors.lock().unwrap().clone();
+        (outcome, errors, state, app)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn download_world(
+        layout: tpk_store::Layout,
+        key: &tpk_format::secret::SecretKey,
+        packs: Vec<tpk_format::channel::PackRef>,
+    ) -> (
+        TpkState,
+        tauri::App<tauri::test::MockRuntime>,
+        Arc<Mutex<Vec<String>>>,
+    ) {
         use tauri::Listener as _;
         let trust = Arc::new(
             TrustStore::new(&[tpk_format::sign::TrustedKey {
@@ -711,7 +744,7 @@ mod tests {
             sink.lock().unwrap().push(e.payload().to_string())
         });
 
-        let state = TpkState::new(TpkStateParts {
+        let mut state = TpkState::new(TpkStateParts {
             config: TpkConfig::new("http://127.0.0.1:9/latest.json", vec![]),
             trust,
             store: Store::open(layout).unwrap(),
@@ -739,9 +772,8 @@ mod tests {
             skipped: vec![],
         };
         *state.pending.lock().unwrap() = Some((manifest, plan));
-        let outcome = tauri::async_runtime::block_on(state.download(app.handle())).unwrap();
-        let errors = errors.lock().unwrap().clone();
-        (outcome, errors, state, app)
+        state.download_client = Some(reqwest::Client::new());
+        (state, app, errors)
     }
 
     #[test]
@@ -810,6 +842,56 @@ mod tests {
             .join(format!("{}.tpk", pack_ref.sha256))
             .exists());
         assert!(state.status(app.handle()).unwrap().last_error.is_none());
+    }
+
+    #[test]
+    fn concurrent_downloads_consume_one_plan_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let data = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let layout = layout_in(&data, &cache);
+        let key = tpk_format::secret::SecretKey::generate();
+        let pack = crate::tests::base_pack(cache.path(), &key, 1, b"v1");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let received = Arc::clone(&requests);
+        let mut offered = pack_ref(&pack.bytes);
+        offered.url = serve(pack.bytes, move || {
+            received.fetch_add(1, Ordering::SeqCst);
+        });
+        let (state, app, errors) = download_world(layout, &key, vec![offered]);
+        let (first, second) = tauri::async_runtime::block_on(async {
+            tokio::join!(biased; state.download(app.handle()), state.download(app.handle()))
+        });
+        assert!(matches!(first.unwrap(), DownloadOutcome::Staged { .. }));
+        assert_eq!(second.unwrap(), DownloadOutcome::UpToDate);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert!(errors.lock().unwrap().is_empty());
+        assert!(state.status(app.handle()).unwrap().pending);
+    }
+
+    #[test]
+    fn reset_waits_for_download_and_clears_its_staged_result() {
+        let data = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let layout = layout_in(&data, &cache);
+        let key = tpk_format::secret::SecretKey::generate();
+        let pack = crate::tests::base_pack(cache.path(), &key, 1, b"v1");
+        let mut offered = pack_ref(&pack.bytes);
+        offered.url = serve(pack.bytes, || {});
+        let (state, app, errors) = download_world(layout, &key, vec![offered]);
+        let (download, reset) = tauri::async_runtime::block_on(async {
+            // The first future acquires the operation before awaiting HTTP;
+            // reset queues behind it and clears the finished stage.
+            tokio::join!(biased;
+                state.download(app.handle()),
+                state.reset(app.handle(), ResetOptions::default()),
+            )
+        });
+        assert!(matches!(download.unwrap(), DownloadOutcome::Staged { .. }));
+        assert!(!reset.unwrap().pending);
+        assert!(state.pending.lock().unwrap().is_none());
+        assert!(state.lock_store().unwrap().state().staged.is_none());
+        assert!(errors.lock().unwrap().is_empty());
     }
 
     #[test]

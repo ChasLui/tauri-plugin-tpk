@@ -52,14 +52,17 @@ pub fn resume_offset(tmp_dir: &Path, pack: &PackRef) -> u64 {
 /// # Errors
 ///
 /// Returns [`ClientError::Format`] when the bytes do not hash to what the
-/// manifest advertised, and [`ClientError::Io`] on filesystem failure.
+/// manifest advertised, [`ClientError::Network`] for an incomplete download
+/// (whose prefix is retained), and [`ClientError::Io`] on filesystem failure.
 pub fn finalize(tmp_dir: &Path, out_dir: &Path, pack: &PackRef) -> Result<DownloadedPack> {
     let part = part_path(tmp_dir, pack);
     let bytes = std::fs::read(&part)?;
 
     if bytes.len() as u64 != pack.size {
-        // Remove it: a truncated part would otherwise be resumed forever from
-        // the wrong offset.
+        // A short response can be a valid prefix; keep it for the next Range request.
+        if (bytes.len() as u64) < pack.size {
+            return Err(ClientError::Network("download is incomplete".into()));
+        }
         let _ = std::fs::remove_file(&part);
         return Err(ClientError::Format(tpk_format::error::FormatError::Hash(
             format!(
@@ -118,7 +121,7 @@ pub fn prune_parts(tmp_dir: &Path, wanted: &[PackRef]) -> usize {
 
 /// Everything a download needs besides the pack itself.
 pub struct DownloadRequest<'a> {
-    /// HTTP client to reuse across packs.
+    /// HTTP client to reuse across packs. Use [`crate::runtime_http_client`] in production.
     pub client: &'a reqwest::Client,
     /// Where `.part` files live.
     pub tmp_dir: &'a Path,
@@ -170,7 +173,7 @@ pub async fn download_pack(req: &DownloadRequest<'_>, pack: &PackRef) -> Result<
         let response = request
             .send()
             .await
-            .map_err(|e| ClientError::Network(format!("{}: {e}", redact(&pack.url))))?;
+            .map_err(crate::transport::network_error)?;
 
         let status = response.status();
         if !status.is_success() {
@@ -178,6 +181,48 @@ pub async fn download_pack(req: &DownloadRequest<'_>, pack: &PackRef) -> Result<
                 status: status.as_u16(),
                 message: redact(&pack.url),
             });
+        }
+        // Validate the byte interval before opening (and possibly truncating) the part.
+        let response_bytes = match status.as_u16() {
+            206 => {
+                let range = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_RANGE)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(parse_content_range);
+                let Some((start, end, total)) = range else {
+                    return Err(ClientError::Network("invalid Content-Range".into()));
+                };
+                if start != offset || total != pack.size || end < start || end >= total {
+                    return Err(ClientError::Network(
+                        "Content-Range does not match requested pack".into(),
+                    ));
+                }
+                end - start + 1
+            }
+            200 => pack.size,
+            _ => {
+                return Err(ClientError::Network(
+                    "unexpected successful download status".into(),
+                ))
+            }
+        };
+        if response
+            .content_length()
+            .is_some_and(|len| len > response_bytes)
+        {
+            return Err(ClientError::TooLarge {
+                what: redact(&pack.url),
+                limit: response_bytes,
+            });
+        }
+        if response
+            .content_length()
+            .is_some_and(|len| len != response_bytes)
+        {
+            return Err(ClientError::Network(
+                "response length does not match requested pack".into(),
+            ));
         }
         // A server that ignores Range answers 200 with the whole file; starting
         // over is correct, appending would corrupt it.
@@ -195,15 +240,16 @@ pub async fn download_pack(req: &DownloadRequest<'_>, pack: &PackRef) -> Result<
 
         let mut stream = response;
         let mut downloaded = offset;
+        let response_end = offset + response_bytes;
         loop {
             let chunk = stream
                 .chunk()
                 .await
-                .map_err(|e| ClientError::Network(e.to_string()))?;
+                .map_err(crate::transport::network_error)?;
             let Some(chunk) = chunk else { break };
 
             downloaded += chunk.len() as u64;
-            if downloaded > pack.size {
+            if downloaded > response_end {
                 let _ = std::fs::remove_file(&part);
                 return Err(ClientError::TooLarge {
                     what: redact(&pack.url),
@@ -224,10 +270,108 @@ pub async fn download_pack(req: &DownloadRequest<'_>, pack: &PackRef) -> Result<
     finalize(tmp_dir, out_dir, pack)
 }
 
+fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
+    let (interval, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let (start, end) = interval.split_once('-')?;
+    if [start, end, total]
+        .iter()
+        .any(|value| value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some((start.parse().ok()?, end.parse().ok()?, total.parse().ok()?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tpk_format::manifest::{PackId, PackKind};
+
+    async fn fetch_fixture(
+        response: Vec<u8>,
+        prefix: &[u8],
+    ) -> (Result<DownloadedPack>, Vec<u8>, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("tmp");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let (url, server) = crate::test_http::serve(response);
+        let mut p = pack(b"0123456789");
+        p.url = url;
+        std::fs::write(part_path(&tmp, &p), prefix).unwrap();
+        let client = crate::test_http::client();
+        let result = download_pack(
+            &DownloadRequest {
+                client: &client,
+                tmp_dir: &tmp,
+                out_dir: &out,
+                headers: &std::collections::HashMap::new(),
+                on_progress: &|_| {},
+                index: 0,
+                count: 1,
+            },
+            &p,
+        )
+        .await;
+        let bytes = match &result {
+            Ok(done) => std::fs::read(&done.path).unwrap(),
+            Err(_) => std::fs::read(part_path(&tmp, &p)).unwrap_or_default(),
+        };
+        (result, bytes, server.join().unwrap())
+    }
+
+    #[tokio::test]
+    async fn range_validation_preserves_existing_prefix_on_invalid_headers() {
+        for range in [
+            None,
+            Some("bytes 0-4/10"),
+            Some("bytes 5-9/11"),
+            Some("bytes 5-10/10"),
+            Some("bytes 9-5/10"),
+            Some("bytes 5-9/*"),
+            Some("garbage"),
+        ] {
+            let header = range
+                .map(|r| format!("Content-Range: {r}\r\n"))
+                .unwrap_or_default();
+            let response = format!("HTTP/1.1 206 Partial Content\r\n{header}Content-Length: 5\r\nConnection: close\r\n\r\n56789");
+            let (result, bytes, request) = fetch_fixture(response.into_bytes(), b"01234").await;
+            let error = result.unwrap_err();
+            assert_eq!(error.code(), tpk_format::error::ErrorCode::Network);
+            assert!(!error.to_string().contains("secret"));
+            assert_eq!(bytes, b"01234");
+            assert!(request.to_lowercase().contains("range: bytes=5-"));
+        }
+    }
+
+    #[tokio::test]
+    async fn short_valid_range_is_kept_and_can_resume_to_completion() {
+        let (result, bytes, _) = fetch_fixture(b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 5-7/10\r\nContent-Length: 3\r\nConnection: close\r\n\r\n567".to_vec(), b"01234").await;
+        assert!(matches!(result, Err(ClientError::Network(_))));
+        assert_eq!(bytes, b"01234567");
+        let (result, bytes, request) = fetch_fixture(b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 8-9/10\r\nContent-Length: 2\r\nConnection: close\r\n\r\n89".to_vec(), &bytes).await;
+        assert!(result.is_ok());
+        assert_eq!(bytes, b"0123456789");
+        assert!(request.to_lowercase().contains("range: bytes=8-"));
+    }
+
+    #[tokio::test]
+    async fn ignored_range_restarts_and_interrupted_stream_keeps_prefix() {
+        let (result, bytes, _) = fetch_fixture(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789"
+                .to_vec(),
+            b"wrong",
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(bytes, b"0123456789");
+        let (result, bytes, _) = fetch_fixture(b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 5-9/10\r\nContent-Length: 5\r\nConnection: close\r\n\r\n567".to_vec(), b"01234").await;
+        assert!(matches!(result, Err(ClientError::Network(_))));
+        assert_eq!(bytes, b"01234567");
+        let (result, bytes, _) = fetch_fixture(b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 5-7/10\r\nContent-Length: 5\r\nConnection: close\r\n\r\n56789".to_vec(), b"01234").await;
+        assert!(result.is_err());
+        assert_eq!(bytes, b"01234");
+    }
 
     fn pack(content: &[u8]) -> PackRef {
         PackRef {
@@ -282,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn a_truncated_part_is_refused_and_removed() {
+    fn a_truncated_part_is_refused_and_preserved() {
         let dir = tempfile::tempdir().unwrap();
         let tmp = dir.path().join("tmp");
         std::fs::create_dir_all(&tmp).unwrap();
@@ -291,7 +435,7 @@ mod tests {
         std::fs::write(part_path(&tmp, &p), b"the full").unwrap();
 
         assert!(finalize(&tmp, &dir.path().join("layers"), &p).is_err());
-        assert!(!part_path(&tmp, &p).exists());
+        assert_eq!(std::fs::read(part_path(&tmp, &p)).unwrap(), b"the full");
     }
 
     #[test]

@@ -84,15 +84,17 @@ type DownloadOutcome =
 the **next cold start**. Tell the user that; do not reload the WebView, which
 would mix modules from two revisions.
 
-`download()` acts on the most recent plan, not on a specific one you were
-handed. There is a single pending slot, so a launch auto-check and a `check()`
-your UI ran can overwrite each other, and what gets staged may not be what the
-user was shown. Both plans come from a signed manifest for the same channel and
-every pack is re-verified at stage, so the outcome is a different valid revision
-rather than an unchecked one.
+Checks, downloads, launch automation and resets share one operation queue.
+`download()` uses the most recent completed check and holds that plan throughout
+the transfer. A successful stage consumes the plan, so queued duplicate downloads
+return `up_to_date`. A later explicit check can replace the pending plan;
+there is no per-caller plan token. Launch automation keeps its check and download
+in one operation.
 
 Downloads resume: a partial transfer lands in `.part` and a later call continues
-it with a Range request. Finished downloads are deleted when the call returns,
+it with a Range request. A partial response must report the requested offset and
+the signed total size in `Content-Range`; valid incomplete prefixes survive a
+retry. Finished downloads are deleted when the call returns,
 staged or not. If a finished download cannot be read back (the cache root was
 purged), the result is `failed` with `E_IO`, not a rejection.
 
@@ -115,7 +117,8 @@ await notifyReady();
 
 Calling it at the top of your entry point makes it meaningless — see
 [Security](./security.md#notifyready-is-self-attestation). Calling it more than
-once is harmless.
+once is harmless. If the state write fails, the trial remains retryable: after
+storage recovers, call `notifyReady()` again to complete the commit.
 
 ## `status()`
 
@@ -163,7 +166,10 @@ await reset({ clearBlacklist: true });    // also forget condemned releases
 
 Requires `tpk:allow-reset`. `clearBlacklist` is for support tooling — it lets a
 device retry a release that was found to be broken, which is exactly why it is
-not the default.
+not the default. Reset waits for the current update operation, then clears its
+staged result and pending plan. The current WebView continues using its frozen
+revision; its layer files and delta results remain until a later cold start can
+reclaim them. Reset takes effect on the next cold start.
 
 `install_id` survives a reset on purpose: re-rolling it would move the device
 into a different rollout bucket and hand it a release it had already been
@@ -232,6 +238,37 @@ file. Everything stateful happens in the plugin's `setup` hook. See
 Also exported: `TpkConfig`, `PubKey`, `PackAssets`, `TpkState`, `Error`,
 `Result`, and the outcome types `CheckOutcome` / `DownloadOutcome` /
 `ReadyOutcome` / `Status`.
+
+### Tombstone HTTP response guard
+
+Tauri's default SPA fallback can return a homepage with status 200 when
+`Assets::get` returns `None` for a deleted path. To return an empty 404 for that
+path, wire the handle into every app webview's response callback:
+
+```rust
+let handle = tpk.clone();
+tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?
+    .on_web_resource_request(move |request, response| {
+        handle.filter_web_resource_response(request.uri(), response);
+    })
+    .build()?;
+```
+
+The method takes `&tauri::http::Uri` and
+`&mut tauri::http::Response<Cow<'static, [u8]>>`. It reads only the frozen index,
+with no decompression or disk access. Ordinary missing paths retain SPA routing;
+only exact winning tombstones at the local Tauri origin become 404.
+
+For config-created windows, disable automatic creation before `Builder::run`
+and explicitly build the saved configurations in app setup, as the example
+does. Preserve any configurations with `create: false` rather than creating them
+unconditionally. Installing `init(tpk)` alone cannot retrofit this hook.
+
+If you already have a response callback, save `request.uri().clone()`, call the
+host callback, then filter the response with that URI. Compose in one closure:
+calling `.on_web_resource_request` twice replaces the earlier callback. Mobile
+dev proxy requests are bypassed. When Tauri fails to resolve any fallback asset,
+it returns an error before the callback, so the guard cannot change that error.
 
 ## Command names
 

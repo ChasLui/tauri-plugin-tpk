@@ -56,7 +56,11 @@ open-ended one would reintroduce the ability to point the updater somewhere
 else, which is the property the whole native-configuration design exists to
 protect.
 
-Non-https URLs are rejected.
+Non-https URLs and redirects to HTTP are rejected. The signed manifest's channel
+must exactly match the configured channel. The shared HTTP client uses a
+10-second connection timeout and a 30-second read timeout, with no fixed total
+download deadline. Manifest bodies are limited to 4 MiB and detached signatures
+to 64 KiB while streaming, before signature verification.
 
 ```json
 "manifest_url": "https://cdn.example.com/tpk/{{channel}}/{{target}}/latest.json"

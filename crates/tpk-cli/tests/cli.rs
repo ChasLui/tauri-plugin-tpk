@@ -58,7 +58,7 @@ impl Fixture {
 
         let path = self.path(name);
         let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
-        let opts: zip::write::FileOptions<'_, ()> =
+        let opts: zip::write::SimpleFileOptions =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
         zip.start_file("tpk-manifest.json", opts).unwrap();
         zip.write_all(&bytes).unwrap();

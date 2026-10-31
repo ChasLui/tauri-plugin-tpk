@@ -132,7 +132,7 @@ src-tauri/
 ### 3.1 容器
 
 - 外层：ZIP。读端接受 stored 与 deflate；`tpk pack` 固定输出 stored，压缩在 blob 层做，便于随机读
-- 中央目录必须存在；ZIP 注释必须为空；条目数 ≤ 65536；条目名不得重复
+- 中央目录必须存在；ZIP 注释必须为空；原始条目数 ≤ 65536；原始条目名不得重复；中央目录与 ZIP64 扩展结束记录的元数据总字节数 ≤ 16 MiB。必须在 ZIP 库去重或按未验证条目数分配内存之前检查，包含 ZIP64。偏移按文件起点解释，中央目录须连续并紧邻结束记录，空注释结束记录须位于 EOF；不接受尾随垃圾或自动修正自解压前缀偏移
 - 验签前读取有上限：`tpk-manifest.json` ≤ 4 MiB，`tpk-manifest.json.minisig` ≤ 64 KiB；超出 → `E_SPEC`
 - 条目名只允许以下形态：
 
@@ -234,7 +234,7 @@ blobs/<blob_sha256>.zst        # encoding = zstd | zstd+bsdiff
   - 包清单：接受任一 `epoch ≥ min_key_epoch` 的受信钥签名（包清单不携带 epoch）
   - `min_key_epoch` 只在渠道清单验签成功后取 `max(min_key_epoch, key_epoch)` 抬升；`epoch < min_key_epoch` 的钥处处被拒
 - 校验顺序：
-  - 渠道：拉取（https、≤ 4 MiB）→ 解析 → 验签（`key_epoch`）→ watermark → 抬升下限 → plan
+  - 渠道：流式拉取（https、清单 ≤ 4 MiB、分离签名 ≤ 64 KiB，按实际收到字节在越界时立即停止）→ 解析 → 验签（`key_epoch`）→ 校验频道等于配置频道 → watermark → 抬升下限 → plan。重定向也必须保持 HTTPS；请求设置连接与读取超时，网络错误不含原始 URL 的查询凭据
   - 包：`size` + `sha256`（下载完成时）→ 写入层池 → 容器结构检查 → 清单签名（`min_key_epoch`）→ 清单解析（路径 / 策略 / parent 形状）→ blob 存在性 → 壳范围 → `id`/`version_code` 与渠道条目一致 → parent 链与其下同 id 层一致 → delta 物化
 
 parent 链在 stage 时逐个校验：本批新包中带 `parent` 的，与修订中位于其下、`id` 相同的最近一层比对，`parent.version_code` 与 `parent.manifest_sha256` 必须同时相等；其下没有同 id 层的 patch 同样拒绝。任一不符 → `E_PARENT`，整次 stage 失败（不写黑名单）。只校验本批新包：继承下来的 committed 层在它们自己 stage 时已经查过，重查等于每次更新都要把整叠层的清单哈希重新推一遍。下层的清单哈希在 stage 时重新打开该包读出，不新增状态字段。渠道 `parent_version_code` 与 delta 的 `delta_base_sha256` 仍然是发布侧与解码侧的防线，三者互不替代。
@@ -322,18 +322,20 @@ URL 由原生配置指定，例如：
 客户端规则：
 
 - **watermark**：按渠道持久化已见最大值。拒绝**严格更小**的清单（`E_WATERMARK`，防重放），接受相等——同一分钟重复发布不应让已见前一份的设备永久失效。按渠道记录——切到别的渠道再切回不应永久丢弃原渠道的清单。
-- 验签通过的清单无论是否有可用包，都先推进该渠道 watermark 与 `min_key_epoch` 并落盘，再做 plan。
+- 验签通过且 `channel` 严格等于配置频道的清单，无论是否有可用包，都先推进该渠道 watermark 与 `min_key_epoch` 并落盘，再做 plan；频道不匹配返回 `E_SPEC`，不推进任何下限。候选状态成功写盘后再发布到内存，写盘失败可重试。
 - **验签失败**：返回错误，由调用方稍后重试，不写 blacklist——blacklist 是包级机制，CDN 瞬时不一致不能永久禁掉好包。
 - **壳版本**：`force_shell` 或渠道 `min_shell` 高于当前壳 → `shell_required`，不应用任何 pack。`force_shell` 连热修复一起停，只在确实不希望这批壳收到任何内容时使用。包自身的 `min_shell`/`max_shell`：渠道条目带有时 plan 先行跳过；stage 时以签名清单再查一次（§7）。
 - **选包（plan）**：候选按 `(kind 序 base<patch<dlc<mod, version_code)` 升序逐个判定，维护每个 `id` 的投影版本（初值为已安装版本）：
   - `kind = mod` → 跳过（mod 永不经渠道下发）
   - 命中 blacklist（§5）→ 跳过
   - 当前壳低于渠道条目 `min_shell` → 跳过（`ShellTooOld`）；高于 `max_shell` → 跳过（`ShellTooNew`）；边界含等号
-  - 被取代 → 跳过（`Superseded`）：预扫一遍，对每个 `id` 取通过全部单包规则（mod、blacklist、壳范围、非 patch 的版本规则即 `version_code` 高于已安装版本且不低于 `version_floor`、rollout）的最高 base/DLC `version_code`；低于它的同 id base/DLC，以及 `parent_version_code` 低于它的 patch，均被取代。新设备落在 base 灰度桶内时只下新 base
+  - 被取代 → 跳过（`Superseded`）：预扫一遍，对每个 `id` 取通过全部单包规则（mod、blacklist、壳范围、非 patch 的版本规则即 `version_code` 高于已安装版本且其可达终点不低于 `version_floor`、rollout）的最高 base/DLC `version_code`；低于它的同 id base/DLC，以及 `parent_version_code` 低于它的 patch，均被取代。新设备落在 base 灰度桶内时只下新 base
   - `patch`：只有 `parent_version_code == 投影版本` 时入选
-  - 其他 kind：两条规则同时成立才入选——`version_code > 投影版本`（相等也拒绝：已经装着就不必再下一遍），否则跳过（`NotNewer`）；且 `version_code ≥ version_floor[id]`（§5），否则跳过（`Downgrade`）。两个原因分开报：`NotNewer` 是寻常的「已经是最新」，`Downgrade` 是防回滚下限真的挡下了一个包，值得被看见。两者问的不是同一个问题：投影版本来自真实在装的层，回答「patch 能叠在什么上面」；`version_floor` 是该 `id` 曾经 commit 过的最高版本，回答「这个 `id` 最多能退到哪」。对 floor 只拒**严格更小**，相等放行——floor 比层活得久（`reset` 保留），若连相等也拒，刚 `reset` 的设备连自己本来在跑的那一版都拉不回来，只能一直停在 embedded；相等是重装，更旧才是降级
+  - 其他 kind：`version_code > 投影版本`（相等也拒绝：已经装着就不必再下一遍），否则跳过（`NotNewer`）
+  - 所有候选在改变投影或取代其他路径之前，检查其可达终点 `≥ version_floor[id]`（§5），否则跳过（`Downgrade`）。base/patch 可沿符合壳范围、blacklist、rollout 的递增 patch 边到达终点；DLC 位于 patch 之上，不可借助后续 patch，其自身版本必须达到下限。低于下限且无法补齐的替代 base 不得遮蔽现有层可达的合法 patch。投影版本来自真实在装的层，回答「patch 能叠在什么上面」；`version_floor` 是曾经 commit 的最高版本，回答「最终内容最多能退到哪」。只拒**严格更小**的终点，相等允许重装；必要的低版本 base 和中间 patch 可以参与达到下限的完整链
   - 不在 rollout 桶内 → 跳过
   - 入选后投影版本 = 该包 `version_code`
+  - 最终按 `id` 检查所选链的最高 `version_code ≥ version_floor[id]`；不满足则整条所选链跳过（`Downgrade`），不激活低于下限的中间 patch。必要的低版本中间 patch 可作为依赖保留，但最终版本必须达到下限；stage 对最终新更新的 id 同样检查，拒绝返回 `E_POLICY`。已有回滚修订和 bundled seed 的豁免不变
   - 某 `id` 的已装层被 condemn 时，该 `id` 的投影初值随之下降（可降到 0）：其上的 patch 因 `parent_version_code` 不再等于投影值而落选，plan 转而选中该 `id` 可用的最高 base。`version_floor` 不随之下降，所以同 `id` 更旧的签名包仍进不来
 - 已安装版本 = committed 与 booting 修订中每个 `id` 的最大 `version_code`，**不计已命中 blacklist 的层**。被 condemn 的层不算装着：活动修订（§7 步骤 3）、stage 的继承过滤（§6.2）与 staged 晋升检查（§7 步骤 2）都已把它丢掉，plan 若仍当它在，就会一直挑它上面的 patch，而这些 patch 每次都在 stage 被 `E_PARENT` 拒绝——同一份必然失败的下载每次 check 都重来一遍。把它从已安装版本里去掉，plan 才会改要一份完整 base。这个值只用来回答「patch 能叠在什么上面」与「是不是已经装着了」；「能不能退版本」由 `version_floor`（§5）回答，否则 condemn 一个层就等于把该 `id` 的降级下限清零，旧包可以原样装回来。
 - 缺失 parent 的 patch 不可单独应用。plan 只在渠道列出的包中按上述规则选择，不会自行改下 base 或拼接渠道外的包；设备能否追上取决于渠道是否列出所需的 base 与中间 patch。
@@ -366,8 +368,8 @@ $APPCACHE/tpk/                  缓存根，系统可随时清空
 
 - 层池只增不移：同一文件被多个修订引用只存一份。晋升、回滚、reset 都只改 `state.json`，不移动层文件。
 - 缓存根下任何文件都不能被假定仍然存在；持久根下任何文件都不能被假定可以从缓存根重建。
-- 原子写：写唯一临时文件 `<name>.tmp.<pid>.<n>` → `fsync` → `rename` → `fsync` 父目录。临时名每次调用唯一，并发写同一目标互不冲突；内容寻址文件 rename 失败但目标已存在时视为成功。
-- `gc()` 引用计数：删除 `layers/` 中未被 staged/booting/committed 任一修订引用的文件，以及 `materialized/` 中这些修订的 delta entry 不再需要的结果；超过 1 小时的临时文件一并删除，更新的临时文件视为写入进行中而保留。幂等、可中断。在 `notify_ready()` 成功提交 booting 修订后与 `reset()` 后执行；回滚或被丢弃的 staged 修订遗留的层在下一次成功提交时释放。提交后的 gc 失败只记日志。
+- 原子写：独占创建唯一临时文件 `<name>.tmp.<pid>.<n>`，已存在则换名重试，不跟随预置符号链接 → `fsync` → `rename` → 同步父目录。Unix 传播父目录打开和 fsync 错误；其他平台保留文件同步与原子 rename，标准库不提供可移植目录同步时不承诺目录项掉电耐久。内容寻址文件 rename 失败但目标已存在时，须确认现有内容一致才能视为成功。
+- `gc()` 引用计数：根集合为 staged/booting/committed 修订，以及当前进程冻结 resolver 保留的层和 delta 结果。只删除这些根集合不再需要的文件；超过 1 小时的临时文件一并删除，更新的临时文件视为写入进行中而保留。幂等、可中断。在 `notify_ready()` 成功提交 booting 修订后与 `reset()` 后执行；reset 不删除当前 WebView 仍需的资源，运行引用不持久化，下次冷启动可回收旧资源。提交后的 gc 失败只记日志。
 - `state.json` 不可解析、`spec` 未知或 `rev` 形状非法，视为全新状态；`blacklist.json` 不可解析视为空黑名单。启动继续，落到 embedded。
 - `layers/` 应排除出平台备份；`state.json` 与 `blacklist.json` 留在备份内。见 §11.1。
 
@@ -511,9 +513,9 @@ cache.insert(path, bytes); return bytes
 
 ### 6.5 Delta 物化
 
-- delta 在 `stage()` 中物化：对合并后栈中的每一层，以栈中**位于它之下的层**构建解析器，取 base → 核对 `delta_base_sha256` → bspatch（§3.4）→ 核对结果 `sha256` → 原子写入 `$APPCACHE/tpk/materialized/<result sha256>`。结果已存在则跳过。新包任一 entry 失败 → stage 失败（`E_DELTA`），不产生修订；继承层缺失的结果尽力修复，失败只记日志。
+- delta 在 `stage()` 中物化：对合并后栈中的每一层，以栈中**位于它之下的层**构建解析器，取 base → 核对 `delta_base_sha256` → bspatch（§3.4）→ 核对结果 `sha256` → 原子写入 `$APPCACHE/tpk/materialized/<result sha256>`。结果已存在则跳过。新包或继承层缺失结果无法物化时，stage 失败，不发布新修订；物化错误使用对应的冻结错误代码。
 - `boot()` 从不物化。
-- `materialized/` 位于缓存根，可被系统清空。setup 发现活动修订所需的物化结果缺失时，起后台线程重新物化，setup 不等待；完成前对应 path 回退 embedded，缺失从不计入任何 strike。读到哈希不符的结果文件会被删除，随后重建。
+- `materialized/` 位于缓存根，可被系统清空。setup 发现活动修订所需的物化结果缺失时，起后台线程尽力逐层重新物化，setup 不等待；单层失败记录并继续，后续依赖完整的独立 id 仍可恢复；完成前对应 path 回退 embedded，缺失从不计入任何 strike。读到哈希不符的结果文件会被删除，随后重建。
 - 〔未实现〕缺失 entry 标 `Pending`，`get` 只阻塞该 entry 等待物化完成；`max_boot_blocking_ms` 预算（§18）。
 - 〔未实现〕`max_delta_chain_depth`（§18）。
 
@@ -553,23 +555,23 @@ booting ──冷启动 boot()，boot_attempts + 1 ≥ 3──────► �
 1. 若 `pointer = booting` 且有 booting 修订：`boot_attempts + 1`。达到 3：对该修订中**不属于 committed 修订**的层 `condemn(not_acknowledged)`，丢弃 booting，`pointer = committed`，`boot_attempts = 0`，`consecutive_rollbacks + 1`。继承自 committed 的层已被确认过，不连坐。
 2. 然后若 `pointer = committed` 且有 staged 修订：任一层被黑名单拦截 → 丢弃 staged；否则 staged 成为 booting，`pointer = booting`，`boot_attempts = 1`。步骤 1 回滚后同一次 boot 内即可晋升新的 staged。
 3. 活动修订 = `pointer` 指向的修订，去掉被黑名单拦截的层。
-4. 一次原子写 `state.json` 与 `blacklist.json`。
+4. 分别原子写 `state.json` 与需要更新的 `blacklist.json`；发生回滚时，先耐久保存新的 condemn 条目，再提交移除 booting 的状态。若黑名单写入失败，保留 booting 供下次启动重试；若后续状态写入失败，已耐久的黑名单仍生效，不能重新试用该坏包。
 
 即：一个修订获得两次试用启动，第 3 次冷启动仍未确认则回滚。杀进程、掉电、用户退出与坏包在此层面无法区分，移动端尤其常见，一次失败即拉黑会误杀正常发布。
 
 `boot()` 不物化 delta，不做与资源总字节数成正比的工作〔未实现：当前 setup 建索引时对每层整文件哈希，§6.3〕。物化不进 boot，避免慢设备被启动看门狗杀掉后被误判为坏包。
 
-`notify_ready()`：有 booting 修订则成为 committed，`pointer = committed`，`boot_attempts = 0`，`consecutive_rollbacks = 0`，清 `last_error`；在返回给 JS 之前完成 `state.json` 的 fsync + rename，不另起异步任务；随后同步执行 `gc()`（§5）。否则 `noop`。可重复调用。
+`notify_ready()`：有 booting 修订则构造 committed 候选状态，`pointer = committed`，`boot_attempts = 0`，`consecutive_rollbacks = 0`，清 `last_error`；在返回给 JS 之前完成 `state.json` 原子写，成功后再发布内存状态，不另起异步任务。状态提交前失败保留可重试的 booting；状态已提交但附属黑名单持久化失败，不把内存退回旧状态，后续调用补写。随后同步执行 `gc()`（§5）。否则 `noop`（仍重试待完成的附属持久化）。可重复调用。
 
 `stage()`：
 
 1. 任一新包被黑名单拦截 → `E_BLACKLIST`。
 2. 每个新包原子写入层池（已存在则不重写）；从层池文件重新打开验签（`min_key_epoch`）。
 3. 当前壳不在包签名清单的 `[min_shell, max_shell]` 内 → 失败（`E_SHELL`，不写黑名单：换个壳即可 stage）；清单 `id`/`version_code` 与渠道条目不一致 → 失败（`E_HASH`）。
-4. 按 §6.2 组成修订，按 §6.5 物化 delta。
+4. 按 §6.2 组成修订，只对本次新更新的 id 检查最终版本下限，按 §6.5 物化 delta；成功后同步 layers/materialized 目录，包括上次失败留下而本次复用的资源，保证状态提交前资源目录项已耐久。
 5. 新修订写入 `staged`（覆盖之前未启动的 staged），原子写 `state.json`。写 `state.json` 即提交点；此前崩溃只留下孤儿文件。
 
-`reset(clear_blacklist = false)`：状态重建为空（无 staged/booting/committed，计数清零），保留 `install_id`、`last_watermark`、`min_key_epoch`；`clear_blacklist = true` 时清空黑名单；随后 `gc()`。下次启动：Embedded + seed（若配置）。需 `tpk:allow-reset`。
+`reset(clear_blacklist = false)`：等待当前更新操作完成，候选状态重建为空（无 staged/booting/committed，计数清零），保留 `install_id`、`last_watermark`、`version_floor`、`min_key_epoch`；`clear_blacklist = true` 时清空黑名单；成功持久化后发布内存并清除待下载计划，随后 `gc()`。当前进程保留冻结 resolver 所需资源；下次启动：Embedded + seed（若配置）。需 `tpk:allow-reset`。
 
 降级：`consecutive_rollbacks ≥ 3` 时 `status().degraded = true`，`check()` 直接返回 `degraded` 且不访问网络；配置值不被改写。`reset`，或一次成功提交 booting 修订的 `notify_ready`，解除降级。
 
@@ -627,7 +629,7 @@ booting ──冷启动 boot()，boot_attempts + 1 ≥ 3──────► �
 | `{{shell}}` | 壳版本（`package.version`，SemVer） |
 
 - 变量名两侧允许空白：`{{ channel }}`；未闭合的 `{{` 报错。
-- 展开在每次 `check` 时进行；非 https 结果拒绝（`E_SPEC`，不落 blacklist）。
+- 展开在每次 `check` 时进行；非 https 结果拒绝（`E_SPEC`，不落 blacklist）。运行时 HTTP 客户端拒绝 HTTP 重定向，连接超时 10 秒，读取超时 30 秒；包下载不设置固定总时限。
 - 模板封闭是刻意的：开放模板等于允许把更新源指向别处。
 
 ### 8.3 `pubkeys` 与 key epoch
@@ -736,7 +738,8 @@ type DownloadOutcome =
 ```
 
 - 没有缓存的 plan 时内部先执行一次 `check`；该 `check` 的 `Err` 原样返回。降级态下此路径得不到 plan，返回 `Err`（`E_STATE`）。
-- 下载断点续传：`.part` 位于 `$APPCACHE/tpk/tmp/`，续传用 Range；有待下载的 plan 时，开始下载前清理 `tmp/` 中不属于本次 plan 的 `.part` 与 `<sha256>.tpk`（含崩溃遗留）。
+- check/download/reset 和启动自动更新共享异步操作队列；自动 check→download 是单次操作。download 固定最近完成的 plan，成功 stage 后将其标为已消费，排队的重复 download 返回 `up_to_date`。reset 等待在途更新结束后清除结果，旧操作不得在 reset 返回后重新 stage。
+- 下载断点续传：`.part` 位于 `$APPCACHE/tpk/tmp/`，续传用 Range；206 必须验证 Content-Range 起点、总大小及响应长度；合法但未完成的前缀保留供重试。服务器忽略 Range 返回 200 时从头重下。有待下载的 plan 时，开始下载前清理 `tmp/` 中不属于本次 plan 的 `.part` 与 `<sha256>.tpk`（含崩溃遗留）。
 - 下载完成的包定稿为 `$APPCACHE/tpk/tmp/<sha256>.tpk`，不跨根 rename 进层池（两根可能不在同一文件系统）；stage 以原子写（fsync）写入层池；这些文件在本次调用结束时删除，无论成功失败。读回失败返回 `failed`（`E_IO`）。
 - 传输错误与 `stage` 失败（验签、哈希、壳范围、delta、黑名单、磁盘）返回 `failed`；`message` 中 URL query 已脱敏。
 - `staged`：已下载、校验、物化 delta，**下次冷启动生效**。修订组成见 §6.2。
@@ -1069,6 +1072,7 @@ App::run()
 
 - 层集合进程生命周期内冻结（§7），故用 `OnceLock<Arc<Resolver>>` 而非锁：运行中的 WebView 始终看到同一份索引。
 - `get(key)`：依次尝试 `key`、`key.html`、`key/index.html`。overlay 命中 → 返回；墓碑 → 返回 `None`，**不回落 embedded**；未命中、层损坏或物化结果缺失 → 下一候选；全部未命中 → embedded（§6.4）。
+- HTTP 墓碑响应：Tauri 内置协议会把 `Assets::get()` 的 `None` 再解释为 SPA 首页回退，可能产生 `200 index.html`。要求宿主在每个 app webview 构建前接入 `TpkHandle::filter_web_resource_response(uri, response)`，在自有响应回调之后执行；精确规范化路径的最高层 `delete` 改为无正文 404，保留安全/CORS头并清除过时实体头。普通缺失路由和高层恢复路径不变，不覆盖 Tauri 内置协议；移动 dev 代理绕过。插件 `init()` 不能给已创建窗口补装该回调。若 Tauri 无可用回退资源而在调用回调前失败，仍返回核心错误，因此宿主必须保留可用 embedded 首页。
 - 路径规范化失败（`..` 等）→ overlay 视为未命中。
 - `iter()`：overlay 与 embedded 的并集，overlay 优先。
 - `csp_hashes(html)`：§6.8。

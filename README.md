@@ -148,6 +148,14 @@ pub fn run() {
 }
 ```
 
+If your updates delete files, also wire
+`TpkHandle::filter_web_resource_response` into each app webview's response hook
+before building it. This returns an empty 404 for an exact tombstone instead of
+Tauri's `200 index.html` SPA fallback. See the
+[host integration](docs/api-reference.md#tombstone-http-response-guard) and the
+[standalone example](examples/shell-app/src-tauri/src/lib.rs). Ordinary missing
+SPA routes keep their fallback; `init` alone cannot retrofit this hook.
+
 ### 5. Add the capability
 
 ```json

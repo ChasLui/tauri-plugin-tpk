@@ -74,7 +74,7 @@ fn build(content: &[u8], damage: Damage) -> Built {
 
     let file = std::fs::File::create(&path).unwrap();
     let mut zip = zip::ZipWriter::new(file);
-    let opts: zip::write::FileOptions<'_, ()> =
+    let opts: zip::write::SimpleFileOptions =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
     zip.start_file("tpk-manifest.json", opts).unwrap();

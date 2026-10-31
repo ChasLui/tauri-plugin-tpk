@@ -21,7 +21,7 @@ flow.
 | `E_NETWORK` | Transport failure reaching the manifest or a pack | Retry later. Common and usually not your bug |
 | `E_SIGNATURE` | No trusted key verified the signature | Stop. Either the key rotated without a shell release, or the content is not yours |
 | `E_HASH` | Content did not match its declared digest | Stop. Corrupt CDN object or a truncated transfer |
-| `E_SPEC` | The document violates the TPK/1 schema | A publishing bug. Run `tpk verify` in CI |
+| `E_SPEC` | The document violates the TPK/1 schema or names another channel | A publishing or routing bug. Run `tpk verify` in CI and check the configured channel |
 | `E_PATH` | A path violates the path rules | A packing bug. `tpk pack` should have caught it |
 | `E_PARENT` | A patch's parent link is missing or unsatisfiable | Publish a full base, or fix the chain |
 | `E_SHELL` | The shell version is outside the pack's range | Route the user to a store update |
@@ -30,7 +30,7 @@ flow.
 | `E_IO` | Filesystem failure | Disk full, permissions, or a purged cache |
 | `E_DELTA` | A delta could not be applied | The base resolved to something other than `delta_base_sha256` |
 | `E_STATE` | On-disk state is missing or inconsistent | The plugin degrades to embedded assets. Report it |
-| `E_POLICY` | A policy was violated | Non-default override globs, or a `mod` manifest not declaring `trusted = false` |
+| `E_POLICY` | A policy was violated | Invalid override/mod policy, or an updated id's final staged version below its committed floor |
 
 ## Notes on the ones that surprise people
 

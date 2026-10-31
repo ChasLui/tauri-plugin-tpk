@@ -32,21 +32,25 @@ plugin is built, and you can check each one:
 | Threat | What stops it |
 |---|---|
 | Tampered CDN | minisign signature over the manifest bytes, plus a SHA-256 on every pack in the channel manifest and on every blob inside a pack |
-| Replayed old manifest | Monotonic `watermark`, tracked per channel |
+| Replayed old manifest | Monotonic `watermark`, tracked per channel; the signed manifest channel must match the configured channel before either persistent floor advances |
 | Downgrade to known-bad content | Monotonic `version_code` per pack id, answered by two separate numbers: what a patch may stack on comes from the layers really in the stack, while how far back an id may go comes from `version_floor` — the highest `version_code` this device ever committed, raised at commit, never lowered, and kept across both a blacklisting and a `reset` |
-| Half-written pack | Downloads land in `.part` and are finalized in the cache root only after size and hash match; staging writes the pool copy atomically (temp file, `fsync`, `rename`), and `state.json` is written atomically with a directory fsync |
+| Half-written pack | Downloads finalize only after size and hash match; staging and state use exclusive temp creation, file sync and atomic rename, plus directory sync on Unix; failed state publication remains retryable |
 | Bad pack causing a blank screen | Three-state pointer: unacknowledged revisions roll back, and the release is blacklisted |
 | A bad release being republished | The blacklist matches on `(id, version_code)` as well as on hash, so a CI rerun does not slip past it |
 | Zip slip / path traversal | Paths are validated on parse: absolute, POSIX, NFC, no `..`, no empty segments, no drive letters, no reserved prefixes |
 | Decompression bomb | Every blob declares `blob_size`; the zstd reader is bounded by it, and delta output is bounded by the signed `size` and by `max_asset_bytes` |
-| Smuggled content | The container may only hold the manifest, its signature and blobs named by their own digest. Unreferenced blobs are rejected |
+| Smuggled content | Only the manifest, signature and referenced digest-named blobs are allowed; raw duplicate names, more than 65,536 entries and central directories above 16 MiB are rejected before ZIP initialization |
+| Unbounded network input | Manifest and signature bodies have streaming byte limits before verification; HTTP clients enforce HTTPS throughout redirects and connection/read timeouts |
+| URL token disclosure | Network errors strip reqwest's original URL before attaching a redacted request identifier |
 | Key compromise | Multiple trusted keys with a monotonic `key_epoch` floor; see below |
 
 The floor has exactly one exemption: after a `reset`, bundled seed content is
 committed even if its `version_code` is below the floor. Nothing is committed at
 that point, and refusing the seed would leave the device on the embedded assets
 — the same bundled content. Everything the channel offers is still held to the
-floor, so the next successful check moves the device forward again.
+floor, so the next successful check moves the device forward again. Necessary
+intermediate patches can be below the floor, but the final selected version for
+each updated id must meet it; a chain that stops below the floor is rejected.
 
 ## Key rotation, and its real SLA
 

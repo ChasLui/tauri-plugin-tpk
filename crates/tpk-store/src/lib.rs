@@ -19,7 +19,10 @@ pub mod store;
 pub use blacklist::{Blacklist, Reason};
 pub use error::{Result, StoreError};
 pub use layout::Layout;
-pub use materialize::{materialize_stack, missing_materialized, MaterializedDir, MAX_ASSET_BYTES};
+pub use materialize::{
+    materialize_stack, materialize_stack_best_effort, missing_materialized, MaterializeFailure,
+    MaterializeRecovery, MaterializedDir, MAX_ASSET_BYTES,
+};
 pub use state::{LayerRecord, Pointer, Revision, StoreState};
 pub use store::{
     empty_resolver, resolver_for, BootOutcome, CommitOutcome, IncomingPack, Store,

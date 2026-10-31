@@ -1457,3 +1457,381 @@ fn gc_removes_stale_temp_files_but_keeps_fresh_ones() {
         "the base plus the fresh temp file"
     );
 }
+
+/// Block atomic replacement without relying on permissions (works as root too).
+fn block_file(path: &std::path::Path) -> PathBuf {
+    let backup = path.with_extension("backup");
+    if path.exists() {
+        std::fs::rename(path, &backup).unwrap();
+    }
+    std::fs::create_dir(path).unwrap();
+    backup
+}
+
+fn unblock_file(path: &std::path::Path, backup: &std::path::Path) {
+    std::fs::remove_dir(path).unwrap();
+    if backup.exists() {
+        std::fs::rename(backup, path).unwrap();
+    }
+}
+
+#[test]
+fn acknowledging_after_a_failed_write_retries_at_boot_attempt_two() {
+    let w = World::new();
+    let mut store = w.store();
+    store.stage(vec![w.base(2, b"ready")], &w.trust).unwrap();
+    store.boot().unwrap();
+    store.boot().unwrap();
+    assert_eq!(store.state().boot_attempts, 2);
+    let before = store.state().clone();
+    let path = w.layout().state_file();
+    let backup = block_file(&path);
+    assert!(store.commit_booting().is_err());
+    assert_eq!(store.state(), &before);
+    unblock_file(&path, &backup);
+    assert_eq!(w.store().state(), &before);
+    assert_eq!(store.commit_booting().unwrap(), CommitOutcome::Committed);
+    let mut reopened = w.store();
+    assert_eq!(reopened.state().boot_attempts, 0);
+    assert_eq!(reopened.state().pointer, Pointer::Committed);
+    assert!(reopened.boot().unwrap().rolled_back.is_none());
+    assert!(reopened.blacklist().is_empty());
+}
+
+#[test]
+fn stage_reset_and_channel_observation_do_not_publish_failed_state_writes() {
+    let w = World::new();
+    install(&w, vec![w.base(1, b"old")]);
+    let mut store = w.store();
+    store
+        .record_last_error(ErrorCode::Network, "offline")
+        .unwrap();
+    let before = store.state().clone();
+    let layers = w.layer_files();
+    let path = w.layout().state_file();
+    let backup = block_file(&path);
+    assert!(store.stage(vec![w.base(2, b"new")], &w.trust).is_err());
+    assert_eq!(store.state(), &before);
+    assert!(store.reset(true).is_err());
+    assert_eq!(store.state(), &before);
+    assert!(layers.iter().all(|path| path.exists()));
+    assert!(store.observe_channel("stable", 100, 2).is_err());
+    assert_eq!(store.state(), &before);
+    unblock_file(&path, &backup);
+    store.observe_channel("stable", 100, 2).unwrap();
+    assert_eq!(w.store().state().watermark_floor("stable"), 100);
+    assert_eq!(w.store().state().min_key_epoch, 2);
+    assert!(store.state().last_error.is_none());
+    store.observe_channel("stable", 50, 1).unwrap();
+    assert_eq!(store.state().watermark_floor("stable"), 100);
+    assert_eq!(store.state().min_key_epoch, 2);
+    // The original key is below the new epoch: use the trusted epoch-2 key.
+    let pack = w.pack_signed_by(&w.newer_key, "core", PackKind::Base, 2, None, |b| {
+        b.add_full("/index.html", b"new").unwrap();
+    });
+    store.stage(vec![pack], &w.trust).unwrap();
+    store.reset(true).unwrap();
+    assert!(w.store().state().committed.is_none());
+}
+
+#[test]
+fn reset_keeps_published_state_when_ancillary_blacklist_persistence_fails() {
+    let w = World::new();
+    install(&w, vec![w.base(1, b"old")]);
+    let mut store = w.store();
+    let sha = store.state().committed.as_ref().unwrap().layers[0].file_sha256;
+    store.record_failure(sha, Reason::Signature).unwrap();
+    let path = w.layout().blacklist_file();
+    let backup = block_file(&path);
+    assert!(store.reset(true).is_err());
+    assert!(store.state().committed.is_none());
+    assert!(store.blacklist().is_empty());
+    assert_eq!(
+        w.store().state(),
+        store.state(),
+        "state already reached disk"
+    );
+    assert!(
+        w.layout().layer_file(&sha).exists(),
+        "GC follows persistence"
+    );
+    // While ancillary persistence is broken a retry cannot claim success.
+    assert!(store.commit_booting().is_err());
+    unblock_file(&path, &backup);
+    assert_eq!(store.commit_booting().unwrap(), CommitOutcome::Noop);
+    assert!(w.store().blacklist().is_empty());
+    assert!(!w.layout().layer_file(&sha).exists());
+}
+
+#[test]
+fn a_blacklist_only_write_failure_does_not_double_count_on_retry() {
+    let w = World::new();
+    let mut store = w.store();
+    let sha = sha256_hex(b"bad");
+    let path = w.layout().blacklist_file();
+    let backup = block_file(&path);
+    assert!(store.record_failure(sha, Reason::Hash).is_err());
+    assert!(store.blacklist().is_empty());
+    unblock_file(&path, &backup);
+    assert!(!store.record_failure(sha, Reason::Hash).unwrap());
+    assert!(!store.record_failure(sha, Reason::Hash).unwrap());
+    assert!(store.record_failure(sha, Reason::Hash).unwrap());
+}
+
+#[test]
+fn reset_and_gc_retain_the_running_resolvers_uncached_delta_and_full_assets() {
+    let w = World::new();
+    let patched = changed(&big_base_body(), b"CHANGED!!!");
+    install(
+        &w,
+        vec![
+            big_base(&w),
+            delta_patch(&w, 2, 1, &big_base_body(), &patched),
+        ],
+    );
+    let mut store = w.store();
+    let outcome = store.boot().unwrap();
+    let r = resolver(&w, &outcome); // zero cache, every read exercises resources
+    store.retain_runtime_layers(&outcome.layers);
+    store.reset(false).unwrap();
+    store.gc().unwrap();
+    assert_eq!(&*r.get(BIG).unwrap(), patched.as_slice());
+    assert_eq!(&*r.get("/other.txt").unwrap(), b"from the base");
+    purge(&w);
+    let recovery = tpk_store::materialize_stack_best_effort(
+        &outcome.layers,
+        &w.trust,
+        1,
+        &w.layout().materialized_dir(),
+    );
+    assert!(recovery.failures.is_empty());
+    store.gc().unwrap();
+    assert_eq!(&*r.get(BIG).unwrap(), patched.as_slice());
+    drop(store);
+    let mut reopened = w.store();
+    assert!(reopened.boot().unwrap().layers.is_empty());
+    reopened.gc().unwrap();
+    assert!(w.layer_files().is_empty());
+    assert!(!w.layout().materialized_file(&sha256_hex(&patched)).exists());
+}
+
+#[test]
+fn recovery_continues_independent_layers_and_refuses_missing_dependencies() {
+    let w = World::new();
+    let v2 = changed(&big_base_body(), b"VERSION 2!");
+    let v3 = changed(&v2, b"VERSION 3!");
+    let addon_base = w.pack_signed_by(&w.key, "addon", PackKind::Base, 1, None, |b| {
+        b.add_full("/addon.txt", b"addon base").unwrap();
+    });
+    let stream = tpk_delta::diff(b"addon base", b"addon new").unwrap();
+    let addon_patch = w.pack_signed_by(
+        &w.key,
+        "addon",
+        PackKind::Patch,
+        4,
+        Some(w.parent_ref("addon", 1)),
+        |b| {
+            b.add_delta(
+                "/addon.txt",
+                &stream,
+                b"addon new",
+                sha256_hex(b"addon base"),
+            )
+            .unwrap();
+        },
+    );
+    install(
+        &w,
+        vec![
+            big_base(&w),
+            addon_base,
+            delta_patch(&w, 2, 1, &big_base_body(), &v2),
+            delta_patch(&w, 3, 2, &v2, &v3),
+            addon_patch,
+        ],
+    );
+    let outcome = w.store().boot().unwrap();
+    // Locate by persisted metadata rather than depending on JSON whitespace.
+    let state = w.store().state().clone();
+    let sha = state
+        .committed
+        .as_ref()
+        .unwrap()
+        .layers
+        .iter()
+        .find(|layer| layer.id.as_str() == "core" && layer.version_code == 2)
+        .unwrap()
+        .file_sha256;
+    std::fs::remove_file(w.layout().layer_file(&sha)).unwrap();
+    purge(&w);
+    let dir = w.layout().materialized_dir();
+    assert!(tpk_store::materialize_stack(&outcome.layers, &w.trust, 1, &dir).is_err());
+    assert!(!dir.join(sha256_hex(b"addon new").to_hex()).exists());
+    let recovery = tpk_store::materialize_stack_best_effort(&outcome.layers, &w.trust, 1, &dir);
+    assert_eq!(recovery.failures.len(), 2);
+    assert_eq!(recovery.written, 1);
+    assert_eq!(recovery.failures[0].file_sha256, sha);
+    let r = resolver(&w, &outcome);
+    assert_eq!(&*r.get("/addon.txt").unwrap(), b"addon new");
+    assert!(r.get(BIG).is_err());
+}
+
+#[test]
+fn stage_checks_final_versions_but_allows_lower_intermediate_patches_and_rollback() {
+    let w = World::new();
+    install(&w, vec![w.base(1, b"base")]);
+    let mut store = w.store();
+    let core = PackId::parse("core").unwrap();
+    store.state_mut().observe_version(&core, 3);
+    store.save().unwrap();
+    let patch2 = w.pack(PackKind::Patch, 2, Some(w.parent_ref("core", 1)), |b| {
+        b.add_full("/index.html", b"v2").unwrap();
+    });
+    let patch3 = w.pack(PackKind::Patch, 3, Some(w.parent_ref("core", 2)), |b| {
+        b.add_full("/index.html", b"v3").unwrap();
+    });
+    assert_eq!(
+        store
+            .stage(vec![patch2.clone()], &w.trust)
+            .unwrap_err()
+            .code(),
+        ErrorCode::Policy
+    );
+    assert!(store.state().staged.is_none());
+    assert_eq!(
+        store
+            .stage(vec![w.base(2, b"old")], &w.trust)
+            .unwrap_err()
+            .code(),
+        ErrorCode::Policy
+    );
+    store.stage(vec![patch2, patch3], &w.trust).unwrap();
+    for _ in 0..MAX_BOOT_ATTEMPTS - 1 {
+        store.boot().unwrap();
+    }
+    assert!(store.boot().unwrap().rolled_back.is_some());
+    assert_eq!(
+        store.state().committed.as_ref().unwrap().layers[0].version_code,
+        1
+    );
+    assert_eq!(store.state().version_floor.get(&core), Some(&3));
+}
+
+#[test]
+fn an_addon_update_inherits_a_bundled_seed_below_the_core_floor() {
+    let w = World::new();
+    install(&w, vec![w.base(3, b"committed core")]);
+    let mut store = w.store();
+    store.reset(false).unwrap();
+    let seed_dir = w.build.path().join("seed");
+    std::fs::create_dir(&seed_dir).unwrap();
+    std::fs::write(seed_dir.join("core.tpk"), w.base(1, b"bundled core").bytes).unwrap();
+    assert!(store.seed_if_absent(&seed_dir, &w.trust).unwrap());
+    let core = PackId::parse("core").unwrap();
+    assert_eq!(store.state().version_floor.get(&core), Some(&3));
+
+    let addon = w.pack_signed_by(&w.key, "addon", ADDON_KIND, 2, None, |b| {
+        b.add_full("/addon.txt", b"new addon").unwrap();
+    });
+    store.stage(vec![addon], &w.trust).unwrap();
+    let staged = store.state().staged.as_ref().unwrap();
+    assert_eq!(staged.layers.len(), 2);
+    assert!(staged
+        .layers
+        .iter()
+        .any(|layer| layer.id == core && layer.version_code == 1));
+    store.boot().unwrap();
+    store.commit_booting().unwrap();
+    assert_eq!(w.store().state().version_floor.get(&core), Some(&3));
+    assert_eq!(committed_layers(&w).len(), 2);
+    assert_eq!(
+        store
+            .stage(vec![w.base(2, b"channel downgrade")], &w.trust)
+            .unwrap_err()
+            .code(),
+        ErrorCode::Policy
+    );
+}
+
+#[test]
+fn rollback_retries_after_blacklist_write_failure_and_reopen() {
+    let w = World::new();
+    let bad = w.base(2, b"bad trial");
+    let mut store = w.store();
+    store.stage(vec![bad.clone()], &w.trust).unwrap();
+    store.boot().unwrap();
+    store.boot().unwrap();
+    assert_eq!(store.state().boot_attempts, 2);
+    let before = store.state().clone();
+    let path = w.layout().blacklist_file();
+    let backup = block_file(&path);
+    assert!(store.boot().is_err());
+    assert_eq!(store.state(), &before);
+    assert!(store.blacklist().is_empty());
+    drop(store);
+    unblock_file(&path, &backup);
+
+    let mut reopened = w.store();
+    assert_eq!(
+        reopened.state(),
+        &before,
+        "failed condemnation must retain the trial on disk"
+    );
+    assert!(reopened.boot().unwrap().rolled_back.is_some());
+    drop(reopened);
+    let mut reopened = w.store();
+    assert_eq!(reopened.state().pointer, Pointer::Committed);
+    assert_eq!(
+        reopened.stage(vec![bad], &w.trust).unwrap_err().code(),
+        ErrorCode::Blacklist
+    );
+}
+
+#[test]
+fn rollback_keeps_durable_condemnation_when_state_write_fails() {
+    let w = World::new();
+    let bad = w.base(2, b"bad trial");
+    let sha = sha256_hex(&bad.bytes);
+    let mut store = w.store();
+    store.stage(vec![bad.clone()], &w.trust).unwrap();
+    store.boot().unwrap();
+    store.boot().unwrap();
+    assert_eq!(store.state().boot_attempts, 2);
+    let before = store.state().clone();
+    let path = w.layout().state_file();
+    let backup = block_file(&path);
+    assert!(store.boot().is_err());
+    assert_eq!(store.state(), &before);
+    assert!(store.blacklist().blocks(
+        &sha,
+        &bad.id,
+        bad.version_code,
+        tpk_store::blacklist::now_secs()
+    ));
+    drop(store);
+    unblock_file(&path, &backup);
+
+    let mut reopened = w.store();
+    assert_eq!(reopened.state(), &before);
+    assert!(reopened.blacklist().blocks(
+        &sha,
+        &bad.id,
+        bad.version_code,
+        tpk_store::blacklist::now_secs()
+    ));
+    assert_eq!(
+        reopened.stage(vec![bad], &w.trust).unwrap_err().code(),
+        ErrorCode::Blacklist
+    );
+    assert!(reopened.boot().unwrap().rolled_back.is_some());
+    assert!(reopened.boot().unwrap().layers.is_empty());
+}
+
+#[test]
+fn a_fresh_unchanged_boot_still_persists_the_install_identity() {
+    let w = World::new();
+    let mut store = w.store();
+    let install_id = store.state().install_id.clone();
+    store.boot().unwrap();
+    assert_eq!(w.store().state().install_id, install_id);
+}

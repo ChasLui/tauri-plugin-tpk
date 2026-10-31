@@ -155,3 +155,24 @@ fn an_unknown_spec_tag_is_refused() {
     .unwrap();
     assert!(verify_channel(&signed(&key, body), &trust(&[(&key, 1)]), 1, 0).is_err());
 }
+
+#[test]
+fn expected_channel_is_checked_even_at_an_unchanged_watermark() {
+    let key = SecretKey::generate();
+    let store = trust(&[(&key, 1)]);
+    let document = signed(&key, manifest_json(42, 1));
+    assert!(tpk_client::verify_channel_for(&document, &store, 1, 42, "stable").is_ok());
+    let before = document.clone();
+    let error = tpk_client::verify_channel_for(&document, &store, 1, 42, "beta").unwrap_err();
+    assert_eq!(error.code(), tpk_format::error::ErrorCode::Spec);
+    assert_eq!(document, before);
+    // Legacy verification remains compatible, but does not bind channel identity.
+    assert!(verify_channel(&document, &store, 1, 42).is_ok());
+    // Identity is checked before freshness, so callers never accept another channel.
+    assert_eq!(
+        tpk_client::verify_channel_for(&document, &store, 1, 43, "beta")
+            .unwrap_err()
+            .code(),
+        tpk_format::error::ErrorCode::Spec
+    );
+}

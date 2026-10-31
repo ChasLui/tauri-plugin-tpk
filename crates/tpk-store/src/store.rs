@@ -12,10 +12,10 @@ use tpk_resolve::{IndexBuilder, LayerSpec, NoMaterialized};
 use crate::blacklist::{now_secs, Blacklist, Reason};
 use crate::error::{Result, StoreError};
 use crate::layout::Layout;
-use crate::materialize::{materialize_layer, MaterializedDir};
+use crate::materialize::MaterializedDir;
 use crate::state::{
-    atomic_write, atomic_write_json, LastError, LayerRecord, Pointer, Revision, StoreState,
-    TEMP_MARKER,
+    atomic_write, atomic_write_json, sync_parent, LastError, LayerRecord, Pointer, Revision,
+    StoreState, TEMP_MARKER,
 };
 
 /// How many unacknowledged launches a revision gets before it is rolled back.
@@ -70,13 +70,24 @@ pub enum CommitOutcome {
 }
 
 /// The on-disk store.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Store {
     layout: Layout,
     state: StoreState,
     blacklist: Blacklist,
     /// Set for the duration of a `stage_for_shell` call.
     shell_version: Option<semver::Version>,
+    runtime_layers: std::collections::HashSet<Sha256Hex>,
+    runtime_materialized: std::collections::HashSet<Sha256Hex>,
+    blacklist_pending: bool,
+    state_write_pending: bool,
+    state_persisted: bool,
+}
+
+#[derive(Clone, Copy)]
+enum TransactionOrder {
+    StateFirst,
+    BlacklistFirst,
 }
 
 impl Store {
@@ -90,16 +101,22 @@ impl Store {
     /// Returns [`StoreError::Io`] only if the directories cannot be created.
     pub fn open(layout: Layout) -> Result<Self> {
         layout.create_dirs()?;
-        let state = std::fs::read(layout.state_file())
+        let persisted = std::fs::read(layout.state_file())
             .ok()
-            .and_then(|bytes| StoreState::parse(&bytes).ok())
-            .unwrap_or_default();
+            .and_then(|bytes| StoreState::parse(&bytes).ok());
+        let state_persisted = persisted.is_some();
+        let state = persisted.unwrap_or_default();
         let blacklist = Blacklist::load(&layout.blacklist_file());
         let mut store = Self {
             layout,
             state,
             blacklist,
             shell_version: None,
+            runtime_layers: Default::default(),
+            runtime_materialized: Default::default(),
+            blacklist_pending: false,
+            state_write_pending: false,
+            state_persisted,
         };
         if store.backfill_version_floor() {
             // A state written before the floor existed. Persisted so the next
@@ -206,6 +223,10 @@ impl Store {
     ///
     /// Returns [`StoreError::Io`] if the copy fails.
     pub fn seed_if_absent(&mut self, seed_dir: &Path, trust: &Arc<TrustStore>) -> Result<bool> {
+        self.transaction(|candidate| candidate.seed_if_absent_inner(seed_dir, trust))
+    }
+
+    fn seed_if_absent_inner(&mut self, seed_dir: &Path, trust: &Arc<TrustStore>) -> Result<bool> {
         if self.state.committed.is_some() || !seed_dir.is_dir() {
             return Ok(false);
         }
@@ -245,7 +266,6 @@ impl Store {
         self.state.committed = Some(rev);
         self.state.pointer = Pointer::Committed;
         self.raise_version_floor();
-        self.persist()?;
         Ok(true)
     }
 
@@ -255,6 +275,12 @@ impl Store {
     ///
     /// Returns [`StoreError::Io`] if the new state cannot be persisted.
     pub fn boot(&mut self) -> Result<BootOutcome> {
+        self.transaction_with_order(TransactionOrder::BlacklistFirst, |candidate| {
+            candidate.boot_inner()
+        })
+    }
+
+    fn boot_inner(&mut self) -> Result<BootOutcome> {
         let now = now_secs();
         let mut blacklisted = Vec::new();
         let mut rolled_back = None;
@@ -318,7 +344,6 @@ impl Store {
         }
 
         let layers = self.active_layer_specs(now);
-        self.persist()?;
 
         Ok(BootOutcome {
             layers,
@@ -339,6 +364,14 @@ impl Store {
     ///
     /// Returns [`StoreError::Io`] if the state cannot be persisted.
     pub fn commit_booting(&mut self) -> Result<CommitOutcome> {
+        let result = self.transaction(|candidate| candidate.commit_booting_inner())?;
+        if let Err(error) = self.gc() {
+            log::warn!("[tpk] could not collect superseded layers: {error}");
+        }
+        Ok(result)
+    }
+
+    fn commit_booting_inner(&mut self) -> Result<CommitOutcome> {
         if self.state.pointer != Pointer::Booting || self.state.booting.is_none() {
             return Ok(CommitOutcome::Noop);
         }
@@ -348,16 +381,6 @@ impl Store {
         self.state.consecutive_rollbacks = 0;
         self.state.last_error = None;
         self.raise_version_floor();
-        self.persist()?;
-        // The superseded revision is now unreferenced, as is anything an earlier
-        // rollback or dropped stage left behind. Collected here rather than in
-        // `boot`, which runs before any window exists. Inline under the caller's
-        // lock, so no stage can add references mid-scan; the cost is a directory
-        // scan plus each live layer's manifest, no hashing. The commit is already
-        // on disk, so a failure costs only space and is not the caller's error.
-        if let Err(e) = self.gc() {
-            log::warn!("[tpk] could not collect superseded layers: {e}");
-        }
         Ok(CommitOutcome::Committed)
     }
 
@@ -369,8 +392,10 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError::Blacklisted`] if any pack is blocked, and
-    /// propagates verification, materialization and IO failures.
+    /// Returns [`StoreError::Blacklisted`] if any pack is blocked, or
+    /// [`StoreError::Version`] when an incoming ID's final target is below its floor.
+    /// Propagates verification, materialization and IO failures. Intermediate
+    /// patches may be below the floor when the final target satisfies it.
     pub fn stage(&mut self, packs: Vec<IncomingPack>, trust: &Arc<TrustStore>) -> Result<String> {
         self.stage_for_shell(packs, trust, None)
     }
@@ -392,6 +417,15 @@ impl Store {
         trust: &Arc<TrustStore>,
         shell_version: Option<&semver::Version>,
     ) -> Result<String> {
+        self.transaction(|candidate| candidate.stage_for_shell_inner(packs, trust, shell_version))
+    }
+
+    fn stage_for_shell_inner(
+        &mut self,
+        packs: Vec<IncomingPack>,
+        trust: &Arc<TrustStore>,
+        shell_version: Option<&semver::Version>,
+    ) -> Result<String> {
         self.shell_version = shell_version.cloned();
         let now = now_secs();
         for pack in &packs {
@@ -407,7 +441,28 @@ impl Store {
             }
         }
 
+        let incoming_ids: std::collections::HashSet<_> =
+            packs.iter().map(|pack| pack.id.clone()).collect();
         let rev = self.write_revision(packs, trust)?;
+        let mut targets = std::collections::BTreeMap::new();
+        // Inherited bundled seeds may be below a retained floor after reset.
+        // Only IDs supplied by this update are channel downgrade candidates.
+        for layer in rev
+            .layers
+            .iter()
+            .filter(|layer| incoming_ids.contains(&layer.id))
+        {
+            let target = targets.entry(&layer.id).or_insert(0u64);
+            *target = (*target).max(layer.version_code);
+        }
+        for (id, target) in targets {
+            let floor = self.state.version_floor.get(id).copied().unwrap_or(0);
+            if target < floor {
+                return Err(StoreError::Version(format!(
+                    "{id} final version_code {target} is below floor {floor}"
+                )));
+            }
+        }
         let id = rev.rev.clone();
         self.state.staged = Some(rev);
         // An update landed, so whatever stopped the previous one is history.
@@ -416,7 +471,6 @@ impl Store {
         // Writing state.json is the commit point: layers and materialized
         // results already exist, so a crash before this leaves orphans that the
         // collector cleans up, not a half-visible revision.
-        self.persist()?;
         Ok(id)
     }
 
@@ -426,6 +480,12 @@ impl Store {
     ///
     /// Returns [`StoreError::Io`] if the state cannot be persisted.
     pub fn reset(&mut self, clear_blacklist: bool) -> Result<()> {
+        self.transaction(|candidate| candidate.reset_inner(clear_blacklist))?;
+        self.gc()?;
+        Ok(())
+    }
+
+    fn reset_inner(&mut self, clear_blacklist: bool) -> Result<()> {
         let install_id = self.state.install_id.clone();
         let watermarks = self.state.last_watermark.clone();
         let version_floor = self.state.version_floor.clone();
@@ -446,8 +506,6 @@ impl Store {
         if clear_blacklist {
             self.blacklist.clear();
         }
-        self.persist()?;
-        self.gc()?;
         Ok(())
     }
 
@@ -468,11 +526,11 @@ impl Store {
             // Unknown layer: still record it by hash so a repeat is caught.
             None => (PackId::parse("unknown").expect("valid literal"), 0),
         };
-        let blocked = self
-            .blacklist
-            .record(file_sha256, id, version_code, reason, now);
-        self.blacklist.save(&self.layout.blacklist_file())?;
-        Ok(blocked)
+        self.transaction(|candidate| {
+            Ok(candidate
+                .blacklist
+                .record(file_sha256, id, version_code, reason, now))
+        })
     }
 
     /// Record the failure that stopped an update from landing.
@@ -501,8 +559,10 @@ impl Store {
         if self.state.last_error.as_ref() == Some(&error) {
             return Ok(());
         }
-        self.state.last_error = Some(error);
-        atomic_write_json(&self.layout.state_file(), &self.state)
+        self.transaction(|candidate| {
+            candidate.state.last_error = Some(error);
+            Ok(())
+        })
     }
 
     /// Delete pool entries and materialized results nothing refers to.
@@ -512,9 +572,19 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError::Io`] if the pool cannot be read.
+    /// Returns [`StoreError::Io`] if the pool cannot be read, or
+    /// [`StoreError::State`] while a failed state publication awaits retry.
     pub fn gc(&mut self) -> Result<usize> {
-        let referenced = self.state.referenced_layers();
+        // A rename may have succeeded before its directory sync failed. Until
+        // a subsequent state write succeeds, disk may name candidate resources
+        // absent from the last durable in-memory state. Never collect them.
+        if self.state_write_pending {
+            return Err(StoreError::State(
+                "state persistence must be retried before GC".into(),
+            ));
+        }
+        let mut referenced = self.state.referenced_layers();
+        referenced.extend(&self.runtime_layers);
         let mut removed = 0usize;
         // A young temp file may belong to a write still in flight (a background
         // rebuild, say); deleting it would fail that write's rename. An old one
@@ -570,7 +640,7 @@ impl Store {
 
     /// Hashes of every delta result the live revisions still need.
     fn materialized_hashes(&self) -> std::collections::HashSet<Sha256Hex> {
-        let mut wanted = std::collections::HashSet::new();
+        let mut wanted = self.runtime_materialized.clone();
         for record in self.state.referenced_layer_records() {
             let path = self.layout.layer_file(&record.file_sha256);
             let Ok(pack) = UnverifiedPack::open(&path) else {
@@ -644,7 +714,10 @@ impl Store {
                     )));
                 }
             }
-            if manifest.id != pack.id || manifest.version_code != pack.version_code {
+            if manifest.id != pack.id
+                || manifest.version_code != pack.version_code
+                || manifest.kind != pack.kind
+            {
                 return Err(StoreError::Integrity(format!(
                     "{} declares {} version_code {}, channel said {} version_code {}",
                     path.display(),
@@ -671,7 +744,6 @@ impl Store {
         }
 
         let now = now_secs();
-        let new: Vec<Sha256Hex> = records.iter().map(|r| r.file_sha256).collect();
         let mut layers: Vec<LayerRecord> = self
             .state
             .active()
@@ -691,7 +763,16 @@ impl Store {
         // than diagnosed later as a delta failure, or — when the deltas happen
         // to apply — never diagnosed at all.
         self.check_parents(&layers, &parents)?;
-        self.materialize_all(&layers, &new, trust)?;
+        self.materialize_all(&layers, trust)?;
+
+        // A prior attempt may have renamed a resource before its directory
+        // sync failed. Existing files skip writes on retry, so flush both
+        // resource directories before any revision can name their contents.
+        sync_parent(&self.layout.layers_dir())?;
+        // A cache purge can remove this directory even when the candidate
+        // has no deltas and materialization therefore writes nothing.
+        std::fs::create_dir_all(self.layout.materialized_dir())?;
+        sync_parent(&self.layout.materialized_dir())?;
 
         let counter = self.state.highest_counter() + 1;
         Ok(Revision {
@@ -790,17 +871,8 @@ impl Store {
         Ok(())
     }
 
-    /// Reconstruct every delta in the new layers, each against the stack beneath it.
-    ///
-    /// Inherited layers are repaired on the way up in case the OS purged their
-    /// results. That is best-effort: a failure there is logged, and only
-    /// surfaces if a new layer actually needs the missing base.
-    fn materialize_all(
-        &self,
-        layers: &[LayerRecord],
-        new: &[Sha256Hex],
-        trust: &Arc<TrustStore>,
-    ) -> Result<()> {
+    /// Reconstruct the entire candidate stack before publishing it.
+    fn materialize_all(&self, layers: &[LayerRecord], trust: &Arc<TrustStore>) -> Result<()> {
         let stack: Vec<LayerSpec> = layers
             .iter()
             .map(|l| LayerSpec {
@@ -808,23 +880,12 @@ impl Store {
                 file_sha256: l.file_sha256,
             })
             .collect();
-        for (i, spec) in stack.iter().enumerate() {
-            let result = materialize_layer(
-                spec,
-                &stack[..i],
-                trust,
-                self.state.min_key_epoch,
-                &self.layout.materialized_dir(),
-            );
-            if new.contains(&spec.file_sha256) {
-                result?;
-            } else if let Err(e) = result {
-                log::warn!(
-                    "[tpk] could not repair inherited layer {}: {e}",
-                    spec.file_sha256
-                );
-            }
-        }
+        crate::materialize::materialize_stack(
+            &stack,
+            trust,
+            self.state.min_key_epoch,
+            &self.layout.materialized_dir(),
+        )?;
         Ok(())
     }
 
@@ -841,6 +902,99 @@ impl Store {
                 file_sha256: l.file_sha256,
             })
             .collect()
+    }
+
+    /// Keep the frozen running resolver's resources until this store is dropped.
+    ///
+    /// Call during setup with the layers actually loaded by the resolver. These
+    /// references survive reset and are intentionally absent from state.json.
+    pub fn retain_runtime_layers(&mut self, layers: &[LayerSpec]) {
+        for layer in layers {
+            self.runtime_layers.insert(layer.file_sha256);
+            if let Ok(pack) = UnverifiedPack::open(&layer.path) {
+                if let Ok(manifest) =
+                    tpk_format::manifest::PackManifest::parse(pack.raw_manifest_bytes())
+                {
+                    self.runtime_materialized.extend(
+                        manifest
+                            .entries
+                            .iter()
+                            .filter(|entry| entry.op == Op::Delta)
+                            .filter_map(|entry| entry.sha256),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Persist an accepted channel's monotonic floors and clear its last error.
+    ///
+    /// # Errors
+    /// Returns a persistence error without publishing an unwritten candidate.
+    pub fn observe_channel(
+        &mut self,
+        channel: &str,
+        watermark: u64,
+        min_key_epoch: u32,
+    ) -> Result<()> {
+        self.transaction(|candidate| {
+            candidate.state.observe_watermark(channel, watermark);
+            candidate.state.min_key_epoch = candidate.state.min_key_epoch.max(min_key_epoch);
+            candidate.state.last_error = None;
+            Ok(())
+        })
+    }
+
+    fn transaction<T>(&mut self, change: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.transaction_with_order(TransactionOrder::StateFirst, change)
+    }
+
+    fn transaction_with_order<T>(
+        &mut self,
+        order: TransactionOrder,
+        change: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        if self.blacklist_pending {
+            self.blacklist.save(&self.layout.blacklist_file())?;
+            self.blacklist_pending = false;
+        }
+        let mut candidate = self.clone();
+        let result = change(&mut candidate)?;
+        let state_changed = candidate.state != self.state;
+        let blacklist_changed = self.blacklist.entries() != candidate.blacklist.entries();
+        let blacklist_first = matches!(order, TransactionOrder::BlacklistFirst);
+        if blacklist_changed && blacklist_first {
+            // Boot must durably condemn before discarding the failed trial.
+            // If the later state write fails, retain the durable verdict in
+            // memory as well: both a retry and a restart must block it.
+            candidate.blacklist.save(&self.layout.blacklist_file())?;
+            self.blacklist = candidate.blacklist.clone();
+        }
+        let state_written = state_changed || self.state_write_pending || !self.state_persisted;
+        if state_written {
+            // A state write/sync failure retains the old memory state so the
+            // same operation can retry even if rename made new bytes visible.
+            if let Err(error) = atomic_write_json(&self.layout.state_file(), &candidate.state) {
+                self.state_write_pending = true;
+                return Err(error);
+            }
+            self.state_write_pending = false;
+            self.state_persisted = true;
+        }
+        if blacklist_changed && !state_changed && !blacklist_first {
+            // With no state transition, a failed blacklist write must not
+            // publish an extra transient failure count in memory.
+            candidate.blacklist.save(&self.layout.blacklist_file())?;
+        }
+        self.state = candidate.state;
+        self.blacklist = candidate.blacklist;
+        if state_changed && blacklist_changed && !blacklist_first {
+            // State is already durable. An ancillary failure must not undo it.
+            self.blacklist_pending = true;
+            self.blacklist.save(&self.layout.blacklist_file())?;
+            self.blacklist_pending = false;
+        }
+        Ok(result)
     }
 
     fn persist(&self) -> Result<()> {
@@ -928,4 +1082,171 @@ impl StoreState {
 /// Path helper used by tests and the plugin layer.
 pub fn layer_path(layout: &Layout, sha: &Sha256Hex) -> PathBuf {
     layout.layer_file(sha)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "test-packs")]
+    fn resource_sync_retry(materialized: bool) {
+        use tpk_format::pack::PackBuilder;
+        use tpk_format::secret::SecretKey;
+        use tpk_format::sign::TrustedKey;
+
+        let data = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let build = tempfile::tempdir().unwrap();
+        let layout = Layout::new(data.path(), cache.path());
+        let mut store = Store::open(layout.clone()).unwrap();
+        let key = SecretKey::generate();
+        let trust = Arc::new(
+            TrustStore::new(&[TrustedKey {
+                key: key.public_key_base64(),
+                epoch: 1,
+            }])
+            .unwrap(),
+        );
+        let id = PackId::parse("core").unwrap();
+        let base_body = vec![b'a'; 4096];
+        let mut result = base_body.clone();
+        result[100..110].copy_from_slice(b"new result");
+        let base_path = build.path().join("base.tpk");
+        let mut base = PackBuilder::new(
+            PackKind::Base,
+            id.clone(),
+            "1.0.0".parse().unwrap(),
+            1,
+            "2026-09-11T15:00:00Z",
+        );
+        base.add_full("/index.html", &base_body).unwrap();
+        base.build(&key, &base_path).unwrap();
+        let base_pack = IncomingPack {
+            bytes: std::fs::read(&base_path).unwrap(),
+            id: id.clone(),
+            kind: PackKind::Base,
+            version_code: 1,
+        };
+        let incoming = if materialized {
+            store.stage(vec![base_pack], &trust).unwrap();
+            store.boot().unwrap();
+            store.commit_booting().unwrap();
+            let patch_path = build.path().join("patch.tpk");
+            let mut patch = PackBuilder::new(
+                PackKind::Patch,
+                id.clone(),
+                "2.0.0".parse().unwrap(),
+                2,
+                "2026-09-11T15:00:00Z",
+            )
+            .parent(ParentRef {
+                id: id.clone(),
+                version: "1.0.0".parse().unwrap(),
+                version_code: 1,
+                manifest_sha256: UnverifiedPack::open(&base_path).unwrap().manifest_sha256(),
+            });
+            patch
+                .add_delta(
+                    "/index.html",
+                    &tpk_delta::diff(&base_body, &result).unwrap(),
+                    &result,
+                    sha256_hex(&base_body),
+                )
+                .unwrap();
+            patch.build(&key, &patch_path).unwrap();
+            IncomingPack {
+                bytes: std::fs::read(patch_path).unwrap(),
+                id,
+                kind: PackKind::Patch,
+                version_code: 2,
+            }
+        } else {
+            base_pack
+        };
+        let resource = if materialized {
+            layout.materialized_dir().join(sha256_hex(&result).to_hex())
+        } else {
+            layout.layer_file(&sha256_hex(&incoming.bytes))
+        };
+        let parent = resource.parent().unwrap().to_path_buf();
+        let before = store.state.clone();
+        crate::state::FAIL_PARENT_SYNC_AT.with(|path| *path.borrow_mut() = Some(parent));
+        let first = store.stage(vec![incoming.clone()], &trust);
+        let retry = store.stage(vec![incoming.clone()], &trust);
+        crate::state::FAIL_PARENT_SYNC_AT.with(|path| *path.borrow_mut() = None);
+        assert!(matches!(first, Err(StoreError::Io(_))));
+        assert!(resource.is_file(), "the resource rename succeeded");
+        assert!(
+            matches!(retry, Err(StoreError::Io(_))),
+            "existing resources must still sync before publication"
+        );
+        assert_eq!(store.state, before);
+        assert_eq!(
+            Store::open(layout.clone()).unwrap().state.staged,
+            before.staged
+        );
+        if !materialized {
+            std::fs::remove_dir_all(layout.materialized_dir()).unwrap();
+        }
+        store.stage(vec![incoming], &trust).unwrap();
+        let mut reopened = Store::open(layout).unwrap();
+        let boot = reopened.boot().unwrap();
+        let resolver = resolver_for(&boot, trust, 0, 0, reopened.materialized());
+        assert_eq!(
+            resolver.get("/index.html").unwrap().as_ref(),
+            if materialized {
+                &result[..]
+            } else {
+                &base_body[..]
+            }
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "test-packs")]
+    fn stage_retry_syncs_an_existing_layer_after_rename_sync_failure() {
+        resource_sync_retry(false);
+    }
+
+    #[test]
+    #[cfg(feature = "test-packs")]
+    fn stage_retry_syncs_an_existing_materialized_result_after_rename_sync_failure() {
+        resource_sync_retry(true);
+    }
+
+    #[test]
+    fn a_commit_retries_when_rename_succeeds_but_directory_sync_fails() {
+        let data = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let layout = Layout::new(data.path(), cache.path());
+        let mut store = Store::open(layout.clone()).unwrap();
+        store.state.pointer = Pointer::Booting;
+        store.state.boot_attempts = 2;
+        store.state.booting = Some(Revision {
+            rev: Revision::id(1),
+            layers: vec![],
+        });
+        store.save().unwrap();
+        let before = store.state.clone();
+        crate::state::FAIL_PARENT_SYNC.set(true);
+        let result = store.commit_booting();
+        crate::state::FAIL_PARENT_SYNC.set(false);
+        assert!(result.is_err());
+        assert_eq!(store.state, before);
+        assert!(
+            store.gc().is_err(),
+            "uncertain publication must retain its resources"
+        );
+        let visible = StoreState::parse(&std::fs::read(layout.state_file()).unwrap()).unwrap();
+        assert_eq!(
+            visible.pointer,
+            Pointer::Committed,
+            "rename already happened"
+        );
+        assert_eq!(store.commit_booting().unwrap(), CommitOutcome::Committed);
+        let mut reopened = Store::open(layout).unwrap();
+        assert_eq!(reopened.state.boot_attempts, 0);
+        assert!(reopened.boot().unwrap().rolled_back.is_none());
+        assert!(reopened.blacklist.is_empty());
+    }
 }
