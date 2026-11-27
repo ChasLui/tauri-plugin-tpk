@@ -42,8 +42,8 @@
     "@tauri-apps/api": ">=2.0.0"
   },
   "devDependencies": {
-    "@tauri-apps/api": "^2.12.4",
-    "tsdown": "^0.23.1",
+    "@tauri-apps/api": "^2.12.5",
+    "tsdown": "^0.23.7",
     "typescript": "^7.0.2"
   }
 }
